@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+while getopts ":h" opt;
+    do case ${opt} in
+        h ) echo "Usage: ribosemap [module] [config]" ;;
+        \? ) echo "For usage statement: ribosemap -h" ;;
+    esac
+done
+
+modules=$(dirname $0)
+
+if [[ $1 == "alignment" ]]; then
+    . "$2"
+    $modules/alignment.sh $2
+
+elif [[ $1 == "coordinate" ]]; then
+    . "$2"
+    $modules/coordinate.sh $2
+    $modules/subset.sh $2
+    $modules/refFreqs.sh $2
+    
+elif [[ $1 == "sequence" ]]; then
+    . "$2"
+    $modules/sequence.sh $2
+    $modules/sequence.R $2
+    
+elif [[ $1 == "distribution" ]]; then
+    . "$2"
+    $modules/distribution.sh $2
+    $modules/distribution.R $2
+    
+elif [[ $1 == "composition" ]]; then
+    . "$2"
+    $modules/composition.sh $2
+    $modules/composition.R $2
+   
+ elif [[ $1 == "hotspot" ]]; then
+    . "$2"
+    $modules/hotspot.sh $2
+    $modules/hotspot.R $2
+fi

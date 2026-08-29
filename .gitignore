@@ -1,0 +1,32 @@
+# Local Codex/session state
+.agents/
+.codex
+
+# Runtime outputs
+output/
+logs/
+
+# Other junk
+docs/
+
+# Auto-generated configs
+config/generated/
+config/*
+
+# Large/generated result artifacts at repo root
+*_no_chrMXY.bed
+rnmp_sequences.fa
+rnmp_windows.bed
+
+# Common bioinformatics intermediates and indexes
+*.sam
+*.bam
+*.bai
+*.bedgraph
+*.bw
+*.bigWig
+*.tmp
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
