@@ -14,7 +14,7 @@ Required:
   -c  Single-sample config (must define sample, and exactly one of read1/read2)
 
 Optional:
-  -m  Comma-separated module list (default: trimming,alignment,coordinate,mismatch,removeMXY,composition,sequence,distribution,hotspot)
+  -m  Comma-separated module list (default: trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot)
   -o  Generated config output directory (default: config/generated)
       --sample-log-dir Directory for per-sample combined stdout/stderr logs (default: logs/samples)
       --run-date       Date tag for per-sample logs, e.g. 20260220 (default: today YYYYMMDD)
@@ -32,7 +32,7 @@ USAGE
 }
 
 CONFIG=""
-MODULES="trimming,alignment,coordinate,mismatch,removeMXY,composition,sequence,distribution,hotspot"
+MODULES="trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot"
 GENERATED_DIR="config/generated"
 
 ACCOUNT=""
@@ -97,10 +97,10 @@ if [[ ! -f "${CONFIG}" ]]; then
   exit 1
 fi
 
-read -r sample barcode read1 read2 < <(
+read -r sample barcode read1 read2 technique pattern frag_method < <(
   set +u
   . "${CONFIG}"
-  printf '%s\t%s\t%s\t%s\n' "${sample:-}" "${barcode:-}" "${read1:-}" "${read2:-}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${sample:-}" "${barcode:-}" "${read1:-}" "${read2:-}" "${technique:-}" "${pattern:-}" "${frag_method:-}"
 )
 
 if [[ -z "${sample}" ]]; then
@@ -129,8 +129,8 @@ mkdir -p "${GENERATED_DIR}/single"
 single_samples_tsv="${GENERATED_DIR}/single/${sample}.${RUN_DATE}.samples.tsv"
 
 {
-  printf 'sample\tbarcode\tread1\tread2\n'
-  printf '%s\t%s\t%s\t%s\n' "${sample}" "${barcode}" "${read1}" "${read2}"
+  printf 'sample\tbarcode\tread1\tread2\ttechnique\tpattern\tfrag_method\n'
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${sample}" "${barcode}" "${read1}" "${read2}" "${technique}" "${pattern}" "${frag_method}"
 } > "${single_samples_tsv}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

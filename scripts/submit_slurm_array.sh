@@ -13,7 +13,7 @@ Required:
   -b  Base config
 
 Optional:
-  -m  Comma-separated module list (default: trimming,alignment,coordinate,mismatch,removeMXY,composition,sequence,distribution,hotspot)
+  -m  Comma-separated module list (default: trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot)
   -o  Generated config output directory (default: config/generated)
       --sample-log-dir Directory for per-sample combined stdout/stderr logs (default: logs/samples)
       --run-date       Date tag for per-sample logs, e.g. 20260220 (default: today YYYYMMDD)
@@ -33,7 +33,7 @@ Example:
   scripts/submit_slurm_array.sh \
     -s config/Run22026.samples.tsv \
     -b config/Run22026.config \
-    -m trimming,alignment,coordinate,mismatch \
+    -m trimming,alignment,coordinate,re_correct,mismatch \
     -A gts-fstorici3 \
     -p batch \
     --cpus-per-task 16 \
@@ -46,7 +46,7 @@ USAGE
 
 SAMPLES_TSV=""
 BASE_CONFIG=""
-MODULES="trimming,alignment,coordinate,mismatch,removeMXY,composition,sequence,distribution,hotspot"
+MODULES="trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot"
 GENERATED_DIR="config/generated"
 
 ACCOUNT=""

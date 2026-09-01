@@ -13,16 +13,17 @@ Required:
 
 Optional:
   -m  Comma-separated module list
-      (default: trimming,alignment,coordinate,mismatch,removeMXY,composition,sequence,distribution,hotspot)
+      (default: trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot)
   -j  Number of samples to run in parallel (default: 1)
   -o  Directory to write generated per-sample configs (default: config/generated)
       --dry-run Generate configs and print planned commands without running modules
       --keep-mismatch-fastq Keep temporary mismatch FASTQ under results/<sample>/mismatch/input_fastq
 
 Recognized optional sample-sheet columns:
-  read2      Paired-end mate or read2-only input
-  technique  Per-sample technique override; use '-' to keep base config value
-  pattern    Per-sample UMI pattern override; use '-' or empty to disable extraction
+  read2        Paired-end mate or read2-only input
+  technique    Per-sample technique override; use '-' to keep base config value
+  pattern      Per-sample UMI pattern override; use '-' or empty to disable extraction
+  frag_method  Per-sample fragmentation / enzyme mix; used only by re_correct
 
 Input behavior is inferred per sample row:
   read1 only    -> single-end input using read1
@@ -33,7 +34,7 @@ USAGE
 
 SAMPLES_TSV=""
 BASE_CONFIG=""
-MODULES="trimming,alignment,coordinate,mismatch,removeMXY,composition,sequence,distribution,hotspot"
+MODULES="trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot"
 JOBS=1
 GENERATED_DIR="config/generated"
 DRY_RUN=0
@@ -92,6 +93,8 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RIBOSEMAP_BIN="${ROOT_DIR}/modules/ribosemap"
 REMOVE_MXY_BIN="${ROOT_DIR}/scripts/removeMXY.sh"
+RE_CORRECT_ROOT="${ROOT_DIR}/submodules/ArtificialRiboseDetection"
+RE_CORRECT_BIN="${RE_CORRECT_ROOT}/subtraction.py"
 
 if [[ "${DRY_RUN}" -eq 0 && ! -x "${RIBOSEMAP_BIN}" ]]; then
   echo "Missing executable: ${RIBOSEMAP_BIN}" >&2
@@ -131,10 +134,14 @@ mkdir -p "${GENERATED_DIR}"
 IFS=',' read -r -a MODULE_ARRAY <<< "${MODULES}"
 RUN_TRIMMING=0
 RUN_MISMATCH=0
+RUN_RE_CORRECT=0
 for mod in "${MODULE_ARRAY[@]}"; do
   case "${mod}" in
     trimming)
       RUN_TRIMMING=1
+      ;;
+    re_correct)
+      RUN_RE_CORRECT=1
       ;;
     mismatch)
       RUN_MISMATCH=1
@@ -160,6 +167,16 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
   if [[ "${RUN_MISMATCH}" -eq 1 ]] && ! command -v Rscript >/dev/null 2>&1; then
     echo "Rscript is required but not found in PATH." >&2
     exit 1
+  fi
+  if [[ "${RUN_RE_CORRECT}" -eq 1 ]]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "python3 is required but not found in PATH." >&2
+      exit 1
+    fi
+    if [[ ! -f "${RE_CORRECT_BIN}" ]]; then
+      echo "Missing re_correct helper: ${RE_CORRECT_BIN}" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -202,6 +219,71 @@ normalize_config_override() {
   printf '%s\n' "${value}"
 }
 
+normalize_frag_method() {
+  local value="${1:-}"
+
+  if [[ -z "${value}" || "${value}" == "${UNSET_SENTINEL}" ]]; then
+    return 1
+  fi
+
+  if [[ "${value}" == "-" ]]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  printf '%s\n' "${value}"
+}
+
+re_correct_should_run() {
+  local technique_value="${1:-}"
+  local frag_method_value="${2:-}"
+
+  if [[ "${technique_value}" != "ribose-seq" ]]; then
+    return 1
+  fi
+
+  case "${frag_method_value,,}" in
+    ""|na|dsf|mech)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+pattern_length() {
+  local value="${1:-}"
+
+  if [[ -z "${value}" ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "${#value}"
+}
+
+normalize_re_enzymes() {
+  local value="${1:-}"
+
+  if [[ -z "${value}" ]]; then
+    return 1
+  fi
+
+  value="${value//[/}"
+  value="${value//]/}"
+  value="${value//+/\,}"
+  value="${value// /}"
+  value="${value,,}"
+  value="${value#,}"
+  value="${value%,}"
+  value="$(printf '%s' "${value}" | tr -s ',')"
+
+  if [[ -z "${value}" ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "${value}"
+}
+
 trimmed_fastq_path() {
   local input_fastq="$1"
   local trim_dir="$2"
@@ -232,6 +314,42 @@ trimmed_fastq_path() {
   fi
 
   return 1
+}
+
+predicted_trimmed_fastq_path() {
+  local input_fastq="$1"
+  local trim_dir="$2"
+  local name stem
+
+  name="$(basename "${input_fastq}")"
+  stem="${name}"
+  stem="${stem%.fastq.gz}"
+  stem="${stem%.fq.gz}"
+  stem="${stem%.fastq}"
+  stem="${stem%.fq}"
+
+  printf '%s/%s_trimmed.fq.gz\n' "${trim_dir}" "${stem}"
+}
+
+predicted_trimmed_paired_fastq_paths() {
+  local read1="$1"
+  local read2="$2"
+  local trim_dir="$3"
+  local name1 stem1 name2 stem2
+
+  name1="$(basename "${read1}")"
+  stem1="${name1%.fastq.gz}"
+  stem1="${stem1%.fq.gz}"
+  stem1="${stem1%.fastq}"
+  stem1="${stem1%.fq}"
+
+  name2="$(basename "${read2}")"
+  stem2="${name2%.fastq.gz}"
+  stem2="${stem2%.fq.gz}"
+  stem2="${stem2%.fastq}"
+  stem2="${stem2%.fq}"
+
+  printf '%s/%s_val_1.fq.gz\n%s/%s_val_2.fq.gz\n' "${trim_dir}" "${stem1}" "${trim_dir}" "${stem2}"
 }
 
 classify_input_layout() {
@@ -357,7 +475,7 @@ prepare_trimmed_inputs() {
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     if [[ "${paired}" -eq 1 ]]; then
       echo "[DRY-RUN] ${sample} -> trim_galore --paired ${trim_flag} -q ${trim_q} --length ${trim_length} ${read1} ${read2} -o ${trim_dir}" >&2
-      printf "%s\n%s\n" "${read1}" "${read2}"
+      predicted_trimmed_paired_fastq_paths "${read1}" "${read2}" "${trim_dir}"
       return 0
     fi
     if [[ -n "${trim_adapter}" ]]; then
@@ -365,7 +483,7 @@ prepare_trimmed_inputs() {
     else
       echo "[DRY-RUN] ${sample} -> trim_galore ${trim_flag} -q ${trim_q} --length ${trim_length} ${read1} -o ${trim_dir}" >&2
     fi
-    printf "%s\n\n" "${read1}"
+    printf "%s\n\n" "$(predicted_trimmed_fastq_path "${read1}" "${trim_dir}")"
     return 0
   fi
 
@@ -454,7 +572,6 @@ resolve_analysis_inputs() {
       do_trim=0
       ;;
     "")
-      # Preserve existing behavior when technique is only defined in the base config.
       if [[ "${input_mode}" == "single_r1" ]]; then
         trim_profile="ribose-seq"
         do_trim=1
@@ -515,14 +632,17 @@ generate_config() {
   local read2="$4"
   local technique_field="$5"
   local pattern_field="$6"
+  local frag_method_field="$7"
   local cfg="${GENERATED_DIR}/${sample}.config"
   local abs_base
   local technique_override=""
   local pattern_override=""
+  local frag_method_override=""
 
   abs_base="$(cd "$(dirname "${BASE_CONFIG}")" && pwd)/$(basename "${BASE_CONFIG}")"
   technique_override="$(normalize_config_override "${technique_field}" || true)"
   pattern_override="$(normalize_config_override "${pattern_field}" || true)"
+  frag_method_override="$(normalize_frag_method "${frag_method_field}" || true)"
 
   {
     echo "# Auto-generated by scripts/run_multi_sample.sh"
@@ -541,12 +661,174 @@ generate_config() {
     if [[ "${pattern_field}" != "${UNSET_SENTINEL}" ]]; then
       echo "pattern=$(sq "${pattern_override}")"
     fi
+    if [[ "${frag_method_field}" != "${UNSET_SENTINEL}" ]]; then
+      echo "frag_method=$(sq "${frag_method_override}")"
+    fi
 
     echo "read1=$(sq "${read1}")"
     echo "read2=$(sq "${read2}")"
   } > "${cfg}"
 
   echo "${cfg}"
+}
+
+coordinate_bed_dir() {
+  local sample="$1"
+  printf '%s\n' "${repository}/results/${sample}/coordinate${quality}"
+}
+
+coordinate_bed_path() {
+  local sample="$1"
+  printf '%s\n' "$(coordinate_bed_dir "${sample}")/${sample}.bed"
+}
+
+coordinate_bed_backup_path() {
+  local sample="$1"
+  printf '%s\n' "$(coordinate_bed_dir "${sample}")/${sample}.coordinate.bed"
+}
+
+source_coordinate_bed_for_recorrect() {
+  local sample="$1"
+  local backup_bed coord_bed
+
+  backup_bed="$(coordinate_bed_backup_path "${sample}")"
+  coord_bed="$(coordinate_bed_path "${sample}")"
+
+  if [[ -f "${backup_bed}" ]]; then
+    printf '%s\n' "${backup_bed}"
+    return 0
+  fi
+
+  printf '%s\n' "${coord_bed}"
+}
+
+active_sample_bed_path() {
+  local sample="$1"
+  printf '%s\n' "$(coordinate_bed_path "${sample}")"
+}
+
+link_corrected_bed() {
+  local sample="$1"
+  local coord_dir coord_bed backup_bed rel_target
+
+  coord_dir="$(coordinate_bed_dir "${sample}")"
+  coord_bed="${coord_dir}/${sample}.bed"
+  backup_bed="${coord_dir}/${sample}.coordinate.bed"
+  rel_target="../re_correct/${sample}.bed"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[DRY-RUN] ${sample} -> preserve ${coord_bed} as ${backup_bed} and link ${coord_bed} -> ${rel_target}" >&2
+    return 0
+  fi
+
+  if [[ ! -f "${backup_bed}" ]]; then
+    mv "${coord_bed}" "${backup_bed}"
+  else
+    rm -f "${coord_bed}"
+  fi
+
+  ln -sfn "${rel_target}" "${coord_bed}"
+}
+
+materialize_recorrect_fastq() {
+  local sample="$1"
+  local input_fastq="$2"
+  local out_dir="$3"
+  local out_fastq="${out_dir}/${sample}.fq"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[DRY-RUN] ${sample} -> prepare re_correct fastq ${out_fastq} from ${input_fastq}" >&2
+    echo "${out_fastq}"
+    return 0
+  fi
+
+  mkdir -p "${out_dir}"
+  if [[ "${input_fastq}" == *.gz ]]; then
+    gzip -dc "${input_fastq}" > "${out_fastq}"
+  else
+    cp -f "${input_fastq}" "${out_fastq}"
+  fi
+
+  echo "${out_fastq}"
+}
+
+run_recorrect_module() {
+  local sample="$1"
+  local re_fastq="$2"
+  local technique_value="$3"
+  local pattern_value="$4"
+  local frag_method_value="$5"
+  local re_out coord_input_bed coord_input_dir workbook genome_dir sample_genome re_tmp raw_dir list_file normalized_enzymes d_value corrected_bed
+
+  if ! re_correct_should_run "${technique_value}" "${frag_method_value}"; then
+    echo "[RUN] ${sample} -> re_correct skipped (technique=${technique_value:-unset}, frag_method=${frag_method_value:-unset})" >&2
+    return 0
+  fi
+
+  if [[ "${re_fastq}" == "-" || -z "${re_fastq}" ]]; then
+    echo "re_correct requires a single-end FASTQ input for ${sample}." >&2
+    return 1
+  fi
+  if [[ -z "${pattern_value}" ]]; then
+    echo "re_correct requires a non-empty pattern for eligible ribose-seq samples (${sample})." >&2
+    return 1
+  fi
+  if ! d_value="$(pattern_length "${pattern_value}")"; then
+    echo "Unable to derive re_correct -d from pattern for ${sample}." >&2
+    return 1
+  fi
+  if ! normalized_enzymes="$(normalize_re_enzymes "${frag_method_value}")"; then
+    echo "Unable to normalize frag_method for ${sample}: ${frag_method_value}" >&2
+    return 1
+  fi
+
+  coord_input_bed="$(source_coordinate_bed_for_recorrect "${sample}")"
+  coord_input_dir="$(dirname "${coord_input_bed}")"
+  re_out="${repository}/results/${sample}/re_correct"
+  corrected_bed="${re_out}/${sample}.bed"
+  workbook="${re_out}/${sample}.re_correct.xlsx"
+  genome_dir="$(dirname "${fasta}")"
+  sample_genome="$(basename "${fasta}")"
+  sample_genome="${sample_genome%.fa}"
+  sample_genome="${sample_genome%.fasta}"
+
+  if [[ "${DRY_RUN}" -eq 0 ]]; then
+    if [[ ! -f "${coord_input_bed}" ]]; then
+      echo "re_correct needs coordinate output: missing ${coord_input_bed}" >&2
+      return 1
+    fi
+    mkdir -p "${re_out}"
+  fi
+
+  re_tmp="$(mktemp -d "${TMP_DIR}/re_correct.${sample}.XXXXXX")"
+  raw_dir="${re_tmp}/raw_reads"
+  list_file="${re_tmp}/${sample}.list"
+
+  printf '%s\t%s\t%s\n' "${sample}" "${sample_genome}" "${normalized_enzymes}" > "${list_file}"
+  materialize_recorrect_fastq "${sample}" "${re_fastq}" "${raw_dir}" >/dev/null
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[DRY-RUN] ${sample} -> python3 ${RE_CORRECT_BIN} ${list_file} ${raw_dir} -o ${workbook} -d ${d_value} --subtracted_output ${re_out} --bed ${coord_input_dir} --genome ${genome_dir}" >&2
+    echo "[DRY-RUN] ${sample} -> link corrected BED for downstream modules" >&2
+    return 0
+  fi
+
+  echo "[RUN] ${sample} -> re_correct"
+  python3 "${RE_CORRECT_BIN}" \
+    "${list_file}" \
+    "${raw_dir}" \
+    -o "${workbook}" \
+    -d "${d_value}" \
+    --subtracted_output "${re_out}" \
+    --bed "${coord_input_dir}" \
+    --genome "${genome_dir}"
+
+  if [[ ! -f "${corrected_bed}" ]]; then
+    echo "re_correct finished but corrected BED not found for ${sample}: ${corrected_bed}" >&2
+    return 1
+  fi
+
+  link_corrected_bed "${sample}"
 }
 
 materialize_mismatch_fastq() {
@@ -565,7 +847,6 @@ materialize_mismatch_fastq() {
 
   mkdir -p "${out_dir}"
 
-  # Always regenerate mismatch fastq input for a fresh run.
   if [[ "${input_fastq}" == *.gz ]]; then
     gzip -dc "${input_fastq}" > "${out_fastq}"
   else
@@ -581,15 +862,14 @@ run_mismatch_module() {
   local analysis_fastq="$3"
   local platform="$4"
 
-  local coord_dir sample_bed mm_out mm_fastq
+  local sample_bed mm_out mm_fastq
   local pymatch rrmpolyn mm_analysis poly_file matches_file mismatch_repo
   local mm_fastq_cleanup_path=""
 
   # shellcheck disable=SC1090
   . "${cfg}"
 
-  coord_dir="${repository}/results/${sample}/coordinate${quality}"
-  sample_bed="${coord_dir}/${sample}.bed"
+  sample_bed="$(active_sample_bed_path "${sample}")"
   mm_out="${repository}/results/${sample}/mismatch"
 
   if [[ "${platform}" == "illumina" ]]; then
@@ -606,7 +886,7 @@ run_mismatch_module() {
 
   if [[ "${DRY_RUN}" -eq 0 ]]; then
     if [[ ! -f "${sample_bed}" ]]; then
-      echo "Mismatch module needs coordinate output: missing ${sample_bed}" >&2
+      echo "Mismatch module needs coordinate/re_correct output: missing ${sample_bed}" >&2
       return 1
     fi
     if [[ ! -f "${pymatch}" || ! -f "${rrmpolyn}" ]]; then
@@ -694,9 +974,10 @@ run_one_sample() {
   local read2="$4"
   local technique_field="$5"
   local pattern_field="$6"
+  local frag_method_field="$7"
 
   local inferred input_mode input_read1 input_read2 processed_barcode analysis_fastq cfg
-  local analysis_read1 analysis_read2 mismatch_platform technique_override pattern_override effective_technique effective_pattern
+  local analysis_read1 analysis_read2 mismatch_platform technique_override pattern_override frag_method_override effective_technique effective_pattern effective_frag_method
   local mod
   local sample_modules
   local -a inferred_fields resolved_fields
@@ -707,6 +988,8 @@ run_one_sample() {
   input_read2="${inferred_fields[2]:-}"
   technique_override="$(normalize_config_override "${technique_field}" || true)"
   pattern_override="$(normalize_config_override "${pattern_field}" || true)"
+  frag_method_override="$(normalize_frag_method "${frag_method_field}" || true)"
+
   if [[ "${technique_field}" == "${UNSET_SENTINEL}" ]]; then
     effective_technique="${technique:-}"
   else
@@ -719,6 +1002,12 @@ run_one_sample() {
     effective_pattern="${pattern_override}"
   fi
 
+  if [[ "${frag_method_field}" == "${UNSET_SENTINEL}" ]]; then
+    effective_frag_method="${frag_method:-}"
+  else
+    effective_frag_method="${frag_method_override}"
+  fi
+
   processed_barcode="$(reverse_complement_barcode "${raw_barcode}")"
   if ! mapfile -t resolved_fields < <(resolve_analysis_inputs "${sample}" "${input_mode}" "${input_read1}" "${input_read2}" "${effective_technique}" "${effective_pattern}"); then
     echo "[FAIL] ${sample} -> trimming/input preparation failed" >&2
@@ -729,7 +1018,7 @@ run_one_sample() {
   analysis_fastq="${resolved_fields[2]:-}"
   mismatch_platform="${resolved_fields[3]:-}"
 
-  cfg="$(generate_config "${sample}" "${processed_barcode}" "${analysis_read1}" "${analysis_read2}" "${technique_field}" "${pattern_field}")"
+  cfg="$(generate_config "${sample}" "${processed_barcode}" "${analysis_read1}" "${analysis_read2}" "${technique_field}" "${pattern_field}" "${frag_method_field}")"
 
   echo "[START] ${sample} (input_mode=${input_mode}, technique=${effective_technique:-${technique:-unset}}, config=${cfg})"
 
@@ -740,6 +1029,9 @@ run_one_sample() {
         if [[ "${RUN_TRIMMING}" -eq 1 ]]; then
           echo "[RUN] ${sample} -> trimming complete"
         fi
+        ;;
+      re_correct)
+        run_recorrect_module "${sample}" "${analysis_fastq}" "${effective_technique}" "${effective_pattern}" "${effective_frag_method}"
         ;;
       mismatch)
         if [[ -z "${analysis_fastq}" ]]; then
@@ -789,13 +1081,14 @@ awk -F '\t' '
     read2=(("read2" in idx) ? $(idx["read2"]) : "")
     technique=(("technique" in idx) ? $(idx["technique"]) : "'"${UNSET_SENTINEL}"'")
     pattern=(("pattern" in idx) ? $(idx["pattern"]) : "'"${UNSET_SENTINEL}"'")
+    frag_method=(("frag_method" in idx) ? $(idx["frag_method"]) : "'"${UNSET_SENTINEL}"'")
 
     if (sample == "") {
       print "Invalid row (sample required): " $0 > "/dev/stderr"
       exit 3
     }
 
-    print sample "\t" barcode "\t" read1 "\t" read2 "\t" technique "\t" pattern
+    print sample "\t" barcode "\t" read1 "\t" read2 "\t" technique "\t" pattern "\t" frag_method
   }
 ' "${SAMPLES_TSV}" > "${TASKS_FILE}"
 
@@ -804,20 +1097,21 @@ if [[ ! -s "${TASKS_FILE}" ]]; then
   exit 1
 fi
 
-export ROOT_DIR RIBOSEMAP_BIN REMOVE_MXY_BIN BASE_CONFIG GENERATED_DIR MODULES DRY_RUN repository fasta quality UNSET_SENTINEL
-export RUN_TRIMMING RUN_MISMATCH MISMATCH_REPO_ILLUMINA MISMATCH_REPO_AVITI MISMATCH_POLYN MISMATCH_NTAIL CLEANUP_MISMATCH_FASTQ
-export -f sq reverse_complement_barcode normalize_config_override trimmed_fastq_path trimmed_paired_fastq_paths classify_input_layout prepare_trimmed_inputs
-export -f resolve_analysis_inputs
-export -f generate_config materialize_mismatch_fastq run_mismatch_module run_remove_mxy_module run_one_sample
+export ROOT_DIR RIBOSEMAP_BIN REMOVE_MXY_BIN RE_CORRECT_BIN BASE_CONFIG GENERATED_DIR MODULES DRY_RUN repository fasta quality UNSET_SENTINEL TMP_DIR
+export RUN_TRIMMING RUN_MISMATCH RUN_RE_CORRECT MISMATCH_REPO_ILLUMINA MISMATCH_REPO_AVITI MISMATCH_POLYN MISMATCH_NTAIL CLEANUP_MISMATCH_FASTQ
+export -f sq reverse_complement_barcode normalize_config_override normalize_frag_method re_correct_should_run pattern_length normalize_re_enzymes
+export -f trimmed_fastq_path predicted_trimmed_fastq_path predicted_trimmed_paired_fastq_paths trimmed_paired_fastq_paths classify_input_layout prepare_trimmed_inputs resolve_analysis_inputs
+export -f generate_config coordinate_bed_dir coordinate_bed_path coordinate_bed_backup_path source_coordinate_bed_for_recorrect active_sample_bed_path link_corrected_bed
+export -f materialize_recorrect_fastq run_recorrect_module materialize_mismatch_fastq run_mismatch_module run_remove_mxy_module run_one_sample
 
 if [[ "${JOBS}" -eq 1 ]]; then
-  while IFS=$'\t' read -r sample barcode read1 read2 technique pattern; do
-    run_one_sample "${sample}" "${barcode}" "${read1}" "${read2}" "${technique}" "${pattern}"
+  while IFS=$'\t' read -r sample barcode read1 read2 technique pattern frag_method; do
+    run_one_sample "${sample}" "${barcode}" "${read1}" "${read2}" "${technique}" "${pattern}" "${frag_method}"
   done < "${TASKS_FILE}"
 else
   xargs -a "${TASKS_FILE}" -d $'\n' -P "${JOBS}" -I '{}' bash -lc '
-    IFS=$'\''\t'\'' read -r sample barcode read1 read2 technique pattern <<< "{}"
-    run_one_sample "$sample" "$barcode" "$read1" "$read2" "$technique" "$pattern"
+    IFS=$'\''\t'\'' read -r sample barcode read1 read2 technique pattern frag_method <<< "{}"
+    run_one_sample "$sample" "$barcode" "$read1" "$read2" "$technique" "$pattern" "$frag_method"
   '
 fi
 

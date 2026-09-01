@@ -1,0 +1,3 @@
+[submodule "submodules/ArtificialRiboseDetection"]
+	path = submodules/ArtificialRiboseDetection
+	url = https://github.com/xph9876/ArtificialRiboseDetection

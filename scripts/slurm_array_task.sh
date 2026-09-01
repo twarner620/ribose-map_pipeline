@@ -11,7 +11,7 @@ if [[ -z "${SAMPLES_TSV:-}" || -z "${BASE_CONFIG:-}" ]]; then
   exit 1
 fi
 
-MODULES="${MODULES:-trimming,alignment,coordinate,mismatch,removeMXY,composition,sequence,distribution,hotspot}"
+MODULES="${MODULES:-trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot}"
 if [[ -n "${MODULES_B64:-}" ]]; then
   MODULES="$(printf '%s' "${MODULES_B64}" | base64 -d)"
 fi
