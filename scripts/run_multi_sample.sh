@@ -1026,9 +1026,7 @@ run_one_sample() {
   for mod in "${sample_modules[@]}"; do
     case "${mod}" in
       trimming)
-        if [[ "${RUN_TRIMMING}" -eq 1 ]]; then
-          echo "[RUN] ${sample} -> trimming complete"
-        fi
+        :
         ;;
       re_correct)
         run_recorrect_module "${sample}" "${analysis_fastq}" "${effective_technique}" "${effective_pattern}" "${effective_frag_method}"
