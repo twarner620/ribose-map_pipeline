@@ -6,13 +6,18 @@ Multi-sample wrapper around the Ribose-Map module scripts.
 - Runs many samples from one sample sheet instead of one config at a time.
 - Treats each run as fresh (no implicit skip-if-complete behavior for trimming/mismatch fastq prep).
 - Cleans up temporary mismatch FASTQ copies after mismatch completes/fails (can be disabled with `--keep-mismatch-fastq`).
-- Supports per-sample platform inference and trimming:
-  - illumina: use `read1` and `trim_galore <read1> -a AGTTGCGACACGGATCTATCA -q 15 --length 62`
-  - aviti: use `read2` and `trim_galore <read2> -a AGTTGACAAGCGGTAGCCTGCACACCTTCCGACAT -q 15 --length 50`
+- Supports per-sample input layouts and technique-aware trimming:
+  - `read1` only: single-end input using `read1`
+  - `read2` only: single-end input using `read2` with the AVITI trim profile
+  - `read1` + `read2`: paired-end input
+  - `ribose-seq` uses `trim_galore -a AGTTGCGACACGGATCTATCA -q 15 --length 62`
+  - `emRiboSeq` uses `trim_galore --illumina -q 15 --length 50`
+  - paired `RHII-HydEn-seq` uses `trim_galore --paired --illumina -q 15 --length 30`
+  - `Alk-HydEn-seq` and `Pu-seq` bypass wrapper trimming
 - Adds a platform-aware `mismatch` module (using your Illumina vs AVITI mismatch-analysis repos).
 - Keeps shared settings in one base config.
 - Generates one per-sample config automatically (`config/generated/<sample>.config`).
-- Supports per-sample `barcode` and `read1` (and optional `read2`).
+- Supports per-sample `barcode`, `technique`, `pattern`, `read1`, and `read2`.
 
 ## Repo layout
 - `modules/`: Ribose-Map scripts copied from `ribose-map/modules`.
@@ -27,16 +32,25 @@ Multi-sample wrapper around the Ribose-Map module scripts.
 ## Sample sheet format
 Tab-delimited file with header:
 
-`sample<TAB>barcode<TAB>read1[<TAB>read2]`
+`sample<TAB>barcode<TAB>read1[<TAB>read2<TAB>technique<TAB>pattern]`
 
 Notes:
 - Enter the observed/original barcode sequence in `barcode`; the pipeline reverse-complements it automatically before alignment.
 - Use `-` in `barcode` if no barcode is used for that sample.
-- Platform is inferred per row:
-  - illumina if only `read1` is provided
-  - aviti if only `read2` is provided
-- Exactly one of `read1` or `read2` must be provided for each sample.
+- Input layout is inferred per row:
+  - `read1` only -> single-end input using `read1`
+  - `read2` only -> single-end input using `read2`
+  - `read1` + `read2` -> paired-end input
+- `technique` overrides the base-config `technique` for that sample. Use `-` or omit the column to keep the base-config value.
+- `pattern` overrides the base-config `pattern` for that sample. Use `-` or leave it empty to disable UMI extraction.
+- Trimming is inferred from `technique` and `pattern`.
+- For `ribose-seq`, wrapper trimming is only applied when `pattern` is non-empty.
+- For `emRiboSeq`, wrapper trimming uses the paper-style `--illumina -q 15 --length 50` command.
+- For paired `RHII-HydEn-seq`, wrapper trimming uses `--paired --illumina -q 15 --length 30`.
+- For `Alk-HydEn-seq` and `Pu-seq`, wrapper trimming is skipped.
+- At least one of `read1` or `read2` must be provided for each sample.
 - `mismatch` requires coordinate output (`coordinate` should run before `mismatch`).
+- The wrapper `mismatch` path remains single-end only. Paired-end samples can run the Ribose-Map modules, but not the wrapper `mismatch` module.
 
 ## Run
 1. Edit `config/base.config` with real paths and settings.

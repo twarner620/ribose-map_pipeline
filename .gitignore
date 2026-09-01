@@ -30,3 +30,7 @@ rnmp_windows.bed
 # OS/editor noise
 .DS_Store
 Thumbs.db
+
+# My own runner scripts
+run_ribosemap_multi.sh
+run_ribosemap_single.sh

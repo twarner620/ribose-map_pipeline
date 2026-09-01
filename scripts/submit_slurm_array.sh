@@ -9,7 +9,7 @@ Submit one Slurm array task per sample so samples can run on different nodes.
 Each array task runs exactly one sample using scripts/slurm_array_task.sh.
 
 Required:
-  -s  Sample sheet (header: sample<TAB>barcode<TAB>read1[<TAB>read2])
+  -s  Sample sheet (header starts with: sample<TAB>barcode<TAB>read1)
   -b  Base config
 
 Optional:

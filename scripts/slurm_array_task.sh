@@ -16,6 +16,7 @@ if [[ -n "${MODULES_B64:-}" ]]; then
   MODULES="$(printf '%s' "${MODULES_B64}" | base64 -d)"
 fi
 GENERATED_DIR="${GENERATED_DIR:-config/generated}"
+RESULTS_ROOT="${RESULTS_ROOT:-}"
 DRY_RUN="${DRY_RUN:-0}"
 SAMPLE_LOG_DIR="${SAMPLE_LOG_DIR:-logs/samples}"
 RUN_DATE="${RUN_DATE:-$(date +%Y%m%d)}"
@@ -42,6 +43,13 @@ sample_row="$({
     { print }
   ' "${SAMPLES_TSV}" | sed -n "${SLURM_ARRAY_TASK_ID}p"
 } || true)"
+
+sample_header="$(awk 'NR==1 { print; exit }' "${SAMPLES_TSV}")"
+
+if [[ -z "${sample_header}" ]]; then
+  echo "Sample sheet header is missing: ${SAMPLES_TSV}" >&2
+  exit 1
+fi
 
 if [[ -z "${sample_row}" ]]; then
   echo "No sample row found for SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID}" >&2
@@ -118,7 +126,7 @@ conda activate ribose-map
 set -u
 
 {
-  printf 'sample\tbarcode\tread1\tread2\n'
+  printf '%s\n' "${sample_header}"
   printf '%s\n' "${sample_row}"
 } > "${tmp_tsv}"
 
@@ -129,6 +137,10 @@ args=(
   -j 1
   -o "${GENERATED_DIR}"
 )
+
+if [[ -n "${RESULTS_ROOT}" ]]; then
+  args+=(--results-root "${RESULTS_ROOT}")
+fi
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   args+=(--dry-run)

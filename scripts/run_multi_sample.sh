@@ -8,7 +8,7 @@ Usage: scripts/run_multi_sample.sh -s <samples.tsv> -b <base.config> [-m <module
 Run Ribose-Map modules for multiple samples.
 
 Required:
-  -s  Tab-delimited sample sheet with header: sample<TAB>barcode<TAB>read1[<TAB>read2]
+  -s  Tab-delimited sample sheet with header: sample<TAB>barcode<TAB>read1
   -b  Base config containing shared settings (technique, repository, genome paths, etc.)
 
 Optional:
@@ -19,11 +19,15 @@ Optional:
       --dry-run Generate configs and print planned commands without running modules
       --keep-mismatch-fastq Keep temporary mismatch FASTQ under results/<sample>/mismatch/input_fastq
 
-Platform behavior is inferred per sample row:
-  illumina: read1 is set and read2 is '-' or empty
-  aviti:    read2 is set and read1 is '-' or empty
+Recognized optional sample-sheet columns:
+  read2      Paired-end mate or read2-only input
+  technique  Per-sample technique override; use '-' to keep base config value
+  pattern    Per-sample UMI pattern override; use '-' or empty to disable extraction
 
-If both read1/read2 are set (or both missing), the sample row is rejected.
+Input behavior is inferred per sample row:
+  read1 only    -> single-end input using read1
+  read2 only    -> single-end input using read2 (legacy AVITI path)
+  read1 + read2 -> paired-end input
 USAGE
 }
 
@@ -34,6 +38,7 @@ JOBS=1
 GENERATED_DIR="config/generated"
 DRY_RUN=0
 CLEANUP_MISMATCH_FASTQ=1
+UNSET_SENTINEL="__RIBOSEMAP_UNSET__"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -182,6 +187,21 @@ reverse_complement_barcode() {
   echo "${barcode}" | tr 'ACGTRYKMSWBDHVN' 'TGCAYRMKSWVHDBN' | rev
 }
 
+normalize_config_override() {
+  local value="${1:-}"
+
+  if [[ -z "${value}" || "${value}" == "${UNSET_SENTINEL}" ]]; then
+    return 1
+  fi
+
+  if [[ "${value}" == "-" ]]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  printf '%s\n' "${value}"
+}
+
 trimmed_fastq_path() {
   local input_fastq="$1"
   local trim_dir="$2"
@@ -214,28 +234,7 @@ trimmed_fastq_path() {
   return 1
 }
 
-resolve_analysis_fastq() {
-  local sample="$1"
-  local platform="$2"
-  local platform_read="$3"
-  local trim_dir trimmed
-
-  if [[ "${RUN_TRIMMING}" -eq 1 ]]; then
-    prepare_trimmed_fastq "${sample}" "${platform}" "${platform_read}"
-    return $?
-  fi
-
-  trim_dir="${repository}/results/${sample}/trim_galore"
-  if trimmed="$(trimmed_fastq_path "${platform_read}" "${trim_dir}")"; then
-    echo "[RUN] ${sample} -> reusing trimmed FASTQ ${trimmed}" >&2
-    echo "${trimmed}"
-    return 0
-  fi
-
-  echo "${platform_read}"
-}
-
-infer_platform_and_read() {
+classify_input_layout() {
   local read1="$1"
   local read2="$2"
   local has_r1=0
@@ -249,32 +248,98 @@ infer_platform_and_read() {
   fi
 
   if [[ "${has_r1}" -eq 1 && "${has_r2}" -eq 0 ]]; then
-    printf "illumina\t%s\n" "${read1}"
+    printf "single_r1\n%s\n\n" "${read1}"
     return 0
   fi
   if [[ "${has_r1}" -eq 0 && "${has_r2}" -eq 1 ]]; then
-    printf "aviti\t%s\n" "${read2}"
+    printf "single_r2\n\n%s\n" "${read2}"
+    return 0
+  fi
+  if [[ "${has_r1}" -eq 1 && "${has_r2}" -eq 1 ]]; then
+    printf "paired\n%s\n%s\n" "${read1}" "${read2}"
     return 0
   fi
 
-  echo "Exactly one of read1/read2 must be provided per sample row." >&2
+  echo "At least one of read1/read2 must be provided per sample row." >&2
   return 1
 }
 
-prepare_trimmed_fastq() {
-  local sample="$1"
-  local platform="$2"
-  local platform_read="$3"
-  local trim_dir trimmed
-  local trim_adapter
-  local trim_length
-  local trim_q
+trimmed_paired_fastq_paths() {
+  local read1="$1"
+  local read2="$2"
+  local trim_dir="$3"
+  local name1 stem1 name2 stem2 out1="" out2=""
 
-  case "${platform}" in
-    illumina)
+  name1="$(basename "${read1}")"
+  stem1="${name1%.fastq.gz}"
+  stem1="${stem1%.fq.gz}"
+  stem1="${stem1%.fastq}"
+  stem1="${stem1%.fq}"
+
+  name2="$(basename "${read2}")"
+  stem2="${name2%.fastq.gz}"
+  stem2="${stem2%.fq.gz}"
+  stem2="${stem2%.fastq}"
+  stem2="${stem2%.fq}"
+
+  for candidate in \
+    "${trim_dir}/${stem1}_val_1.fq.gz" \
+    "${trim_dir}/${stem1}_val_1.fastq.gz" \
+    "${trim_dir}/${stem1}_val_1.fq" \
+    "${trim_dir}/${stem1}_val_1.fastq"
+  do
+    if [[ -f "${candidate}" ]]; then
+      out1="${candidate}"
+      break
+    fi
+  done
+
+  for candidate in \
+    "${trim_dir}/${stem2}_val_2.fq.gz" \
+    "${trim_dir}/${stem2}_val_2.fastq.gz" \
+    "${trim_dir}/${stem2}_val_2.fq" \
+    "${trim_dir}/${stem2}_val_2.fastq"
+  do
+    if [[ -f "${candidate}" ]]; then
+      out2="${candidate}"
+      break
+    fi
+  done
+
+  if [[ -n "${out1}" && -n "${out2}" ]]; then
+    printf "%s\n%s\n" "${out1}" "${out2}"
+    return 0
+  fi
+
+  return 1
+}
+
+prepare_trimmed_inputs() {
+  local sample="$1"
+  local trim_profile="$2"
+  local read1="$3"
+  local read2="$4"
+  local trim_dir trimmed
+  local trim_length trim_q trim_adapter="" trim_flag=""
+  local paired=0
+  local -a trimmed_pair
+
+  case "${trim_profile}" in
+    ribose-seq)
       trim_adapter="AGTTGCGACACGGATCTATCA"
       trim_length="62"
       trim_q="15"
+      ;;
+    emRiboSeq)
+      trim_flag="--illumina"
+      trim_length="50"
+      trim_q="15"
+      ;;
+    RHII-HydEn-seq)
+      trim_flag="--illumina"
+      trim_length="30"
+      trim_q="15"
+      paired=1
       ;;
     aviti)
       trim_adapter="AGTTGACAAGCGGTAGCCTGCACACCTTCCGACAT"
@@ -282,7 +347,7 @@ prepare_trimmed_fastq() {
       trim_q="15"
       ;;
     *)
-      echo "Unsupported inferred platform: ${platform}" >&2
+      echo "Unsupported trim profile: ${trim_profile}" >&2
       return 1
       ;;
   esac
@@ -290,28 +355,42 @@ prepare_trimmed_fastq() {
   trim_dir="${repository}/results/${sample}/trim_galore"
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    if [[ -n "${trim_q}" ]]; then
-      echo "[DRY-RUN] ${sample} -> trim_galore ${platform_read} -a ${trim_adapter} -q ${trim_q} --length ${trim_length}" >&2
-    else
-      echo "[DRY-RUN] ${sample} -> trim_galore ${platform_read} -a ${trim_adapter} --length ${trim_length}" >&2
+    if [[ "${paired}" -eq 1 ]]; then
+      echo "[DRY-RUN] ${sample} -> trim_galore --paired ${trim_flag} -q ${trim_q} --length ${trim_length} ${read1} ${read2} -o ${trim_dir}" >&2
+      printf "%s\n%s\n" "${read1}" "${read2}"
+      return 0
     fi
-    echo "${platform_read}"
+    if [[ -n "${trim_adapter}" ]]; then
+      echo "[DRY-RUN] ${sample} -> trim_galore -a ${trim_adapter} -q ${trim_q} --length ${trim_length} ${read1} -o ${trim_dir}" >&2
+    else
+      echo "[DRY-RUN] ${sample} -> trim_galore ${trim_flag} -q ${trim_q} --length ${trim_length} ${read1} -o ${trim_dir}" >&2
+    fi
+    printf "%s\n\n" "${read1}"
     return 0
   fi
 
-  # Always rerun trimming to keep runs fresh.
   rm -rf "${trim_dir}"
   mkdir -p "${trim_dir}"
 
-  echo "[RUN] ${sample} -> trim_galore (${platform})" >&2
-  if [[ -n "${trim_q}" ]]; then
-    trim_galore "${platform_read}" -a "${trim_adapter}" -q "${trim_q}" --length "${trim_length}" --output_dir "${trim_dir}" >&2
-  else
-    trim_galore "${platform_read}" -a "${trim_adapter}" --length "${trim_length}" --output_dir "${trim_dir}" >&2
+  echo "[RUN] ${sample} -> trim_galore (${trim_profile})" >&2
+  if [[ "${paired}" -eq 1 ]]; then
+    trim_galore --paired ${trim_flag} -q "${trim_q}" --length "${trim_length}" "${read1}" "${read2}" -o "${trim_dir}" >&2
+    mapfile -t trimmed_pair < <(trimmed_paired_fastq_paths "${read1}" "${read2}" "${trim_dir}") || {
+      echo "trim_galore finished but paired trimmed outputs were not found for ${sample} in ${trim_dir}" >&2
+      return 1
+    }
+    printf "%s\n%s\n" "${trimmed_pair[0]}" "${trimmed_pair[1]}"
+    return 0
   fi
 
-  if trimmed="$(trimmed_fastq_path "${platform_read}" "${trim_dir}")"; then
-    echo "${trimmed}"
+  if [[ -n "${trim_adapter}" ]]; then
+    trim_galore "${read1}" -a "${trim_adapter}" -q "${trim_q}" --length "${trim_length}" --output_dir "${trim_dir}" >&2
+  else
+    trim_galore ${trim_flag} -q "${trim_q}" --length "${trim_length}" "${read1}" -o "${trim_dir}" >&2
+  fi
+
+  if trimmed="$(trimmed_fastq_path "${read1}" "${trim_dir}")"; then
+    printf "%s\n\n" "${trimmed}"
     return 0
   fi
 
@@ -319,14 +398,131 @@ prepare_trimmed_fastq() {
   return 1
 }
 
+resolve_analysis_inputs() {
+  local sample="$1"
+  local input_mode="$2"
+  local read1="$3"
+  local read2="$4"
+  local technique="$5"
+  local pattern="$6"
+  local trim_dir trimmed
+  local analysis_read1="${read1}"
+  local analysis_read2="${read2}"
+  local mismatch_fastq=""
+  local trim_profile=""
+  local mismatch_platform=""
+  local do_trim=0
+  local -a trimmed_inputs
+
+  case "${input_mode}" in
+    single_r1)
+      mismatch_fastq="${read1}"
+      mismatch_platform="illumina"
+      ;;
+    single_r2)
+      mismatch_fastq="${read2}"
+      mismatch_platform="aviti"
+      ;;
+    paired)
+      ;;
+    *)
+      echo "Unsupported input mode: ${input_mode}" >&2
+      return 1
+      ;;
+  esac
+
+  case "${technique}" in
+    ribose-seq)
+      if [[ "${input_mode}" == "single_r1" && -n "${pattern}" ]]; then
+        trim_profile="ribose-seq"
+        do_trim=1
+      fi
+      ;;
+    emRiboSeq)
+      if [[ "${input_mode}" == "single_r1" ]]; then
+        trim_profile="emRiboSeq"
+        do_trim=1
+      fi
+      ;;
+    RHII-HydEn-seq)
+      if [[ "${input_mode}" == "paired" ]]; then
+        trim_profile="RHII-HydEn-seq"
+        do_trim=1
+      fi
+      ;;
+    Alk-HydEn-seq|Pu-seq)
+      do_trim=0
+      ;;
+    "")
+      # Preserve existing behavior when technique is only defined in the base config.
+      if [[ "${input_mode}" == "single_r1" ]]; then
+        trim_profile="ribose-seq"
+        do_trim=1
+      elif [[ "${input_mode}" == "single_r2" ]]; then
+        trim_profile="aviti"
+        do_trim=1
+      fi
+      ;;
+    *)
+      if [[ "${input_mode}" == "single_r2" ]]; then
+        trim_profile="aviti"
+        do_trim=1
+      elif [[ "${input_mode}" == "single_r1" ]]; then
+        trim_profile="ribose-seq"
+        do_trim=1
+      fi
+      ;;
+  esac
+
+  if [[ "${RUN_TRIMMING}" -eq 1 && "${do_trim}" -eq 1 ]]; then
+    mapfile -t trimmed_inputs < <(prepare_trimmed_inputs "${sample}" "${trim_profile}" "${read1}" "${read2}") || return 1
+    analysis_read1="${trimmed_inputs[0]:-}"
+    analysis_read2="${trimmed_inputs[1]:-}"
+    if [[ "${input_mode}" == "single_r1" ]]; then
+      mismatch_fastq="${analysis_read1}"
+    elif [[ "${input_mode}" == "single_r2" ]]; then
+      mismatch_fastq="${analysis_read2}"
+    fi
+    printf "%s\n%s\n%s\n%s\n" "${analysis_read1}" "${analysis_read2}" "${mismatch_fastq}" "${mismatch_platform}"
+    return 0
+  fi
+
+  if [[ "${RUN_TRIMMING}" -eq 1 && "${do_trim}" -eq 0 ]]; then
+    echo "[RUN] ${sample} -> trimming skipped (technique=${technique:-base-default})" >&2
+  fi
+
+  if [[ "${input_mode}" != "paired" ]]; then
+    trim_dir="${repository}/results/${sample}/trim_galore"
+    if trimmed="$(trimmed_fastq_path "${mismatch_fastq}" "${trim_dir}")"; then
+      echo "[RUN] ${sample} -> reusing trimmed FASTQ ${trimmed}" >&2
+      if [[ "${input_mode}" == "single_r1" ]]; then
+        analysis_read1="${trimmed}"
+      else
+        analysis_read1=""
+        analysis_read2="${trimmed}"
+      fi
+      mismatch_fastq="${trimmed}"
+    fi
+  fi
+
+  printf "%s\n%s\n%s\n%s\n" "${analysis_read1}" "${analysis_read2}" "${mismatch_fastq}" "${mismatch_platform}"
+}
+
 generate_config() {
   local sample="$1"
   local barcode="$2"
   local read1="$3"
+  local read2="$4"
+  local technique_field="$5"
+  local pattern_field="$6"
   local cfg="${GENERATED_DIR}/${sample}.config"
   local abs_base
+  local technique_override=""
+  local pattern_override=""
 
   abs_base="$(cd "$(dirname "${BASE_CONFIG}")" && pwd)/$(basename "${BASE_CONFIG}")"
+  technique_override="$(normalize_config_override "${technique_field}" || true)"
+  pattern_override="$(normalize_config_override "${pattern_field}" || true)"
 
   {
     echo "# Auto-generated by scripts/run_multi_sample.sh"
@@ -339,8 +535,15 @@ generate_config() {
       echo "barcode=''"
     fi
 
+    if [[ "${technique_field}" != "${UNSET_SENTINEL}" ]]; then
+      echo "technique=$(sq "${technique_override}")"
+    fi
+    if [[ "${pattern_field}" != "${UNSET_SENTINEL}" ]]; then
+      echo "pattern=$(sq "${pattern_override}")"
+    fi
+
     echo "read1=$(sq "${read1}")"
-    echo "read2=''"
+    echo "read2=$(sq "${read2}")"
   } > "${cfg}"
 
   echo "${cfg}"
@@ -394,7 +597,7 @@ run_mismatch_module() {
   elif [[ "${platform}" == "aviti" ]]; then
     mismatch_repo="${MISMATCH_REPO_AVITI}"
   else
-    echo "Unsupported inferred platform for mismatch: ${platform}" >&2
+    echo "Unsupported mismatch platform: ${platform}" >&2
     return 1
   fi
 
@@ -489,24 +692,46 @@ run_one_sample() {
   local raw_barcode="$2"
   local read1="$3"
   local read2="$4"
+  local technique_field="$5"
+  local pattern_field="$6"
 
-  local inferred platform platform_read processed_barcode analysis_fastq cfg
+  local inferred input_mode input_read1 input_read2 processed_barcode analysis_fastq cfg
+  local analysis_read1 analysis_read2 mismatch_platform technique_override pattern_override effective_technique effective_pattern
   local mod
   local sample_modules
+  local -a inferred_fields resolved_fields
 
-  inferred="$(infer_platform_and_read "${read1}" "${read2}")"
-  platform="${inferred%%$'\t'*}"
-  platform_read="${inferred#*$'\t'}"
+  mapfile -t inferred_fields < <(classify_input_layout "${read1}" "${read2}") || return 1
+  input_mode="${inferred_fields[0]:-}"
+  input_read1="${inferred_fields[1]:-}"
+  input_read2="${inferred_fields[2]:-}"
+  technique_override="$(normalize_config_override "${technique_field}" || true)"
+  pattern_override="$(normalize_config_override "${pattern_field}" || true)"
+  if [[ "${technique_field}" == "${UNSET_SENTINEL}" ]]; then
+    effective_technique="${technique:-}"
+  else
+    effective_technique="${technique_override}"
+  fi
+
+  if [[ "${pattern_field}" == "${UNSET_SENTINEL}" ]]; then
+    effective_pattern="${pattern:-}"
+  else
+    effective_pattern="${pattern_override}"
+  fi
 
   processed_barcode="$(reverse_complement_barcode "${raw_barcode}")"
-  if ! analysis_fastq="$(resolve_analysis_fastq "${sample}" "${platform}" "${platform_read}")"; then
+  if ! mapfile -t resolved_fields < <(resolve_analysis_inputs "${sample}" "${input_mode}" "${input_read1}" "${input_read2}" "${effective_technique}" "${effective_pattern}"); then
     echo "[FAIL] ${sample} -> trimming/input preparation failed" >&2
     return 1
   fi
+  analysis_read1="${resolved_fields[0]:-}"
+  analysis_read2="${resolved_fields[1]:-}"
+  analysis_fastq="${resolved_fields[2]:-}"
+  mismatch_platform="${resolved_fields[3]:-}"
 
-  cfg="$(generate_config "${sample}" "${processed_barcode}" "${analysis_fastq}")"
+  cfg="$(generate_config "${sample}" "${processed_barcode}" "${analysis_read1}" "${analysis_read2}" "${technique_field}" "${pattern_field}")"
 
-  echo "[START] ${sample} (platform=${platform}, config=${cfg})"
+  echo "[START] ${sample} (input_mode=${input_mode}, technique=${effective_technique:-${technique:-unset}}, config=${cfg})"
 
   IFS=',' read -r -a sample_modules <<< "${MODULES}"
   for mod in "${sample_modules[@]}"; do
@@ -517,7 +742,11 @@ run_one_sample() {
         fi
         ;;
       mismatch)
-        run_mismatch_module "${sample}" "${cfg}" "${analysis_fastq}" "${platform}"
+        if [[ -z "${analysis_fastq}" ]]; then
+          echo "Mismatch module is only supported for single-end inputs in this wrapper." >&2
+          return 1
+        fi
+        run_mismatch_module "${sample}" "${cfg}" "${analysis_fastq}" "${mismatch_platform}"
         ;;
       removeMXY)
         run_remove_mxy_module "${sample}"
@@ -542,7 +771,10 @@ TASKS_FILE="${TMP_DIR}/tasks.tsv"
 
 awk -F '\t' '
   NR==1 {
-    if ($1 != "sample" || $2 != "barcode" || $3 != "read1") {
+    for (i = 1; i <= NF; i++) {
+      idx[$i] = i
+    }
+    if (idx["sample"] != 1 || idx["barcode"] != 2 || idx["read1"] != 3) {
       print "Header must start with: sample<TAB>barcode<TAB>read1" > "/dev/stderr"
       exit 2
     }
@@ -551,17 +783,19 @@ awk -F '\t' '
   NF==0 { next }
   /^#/ { next }
   {
-    sample=$1
-    barcode=$2
-    read1=$3
-    read2=(NF>=4 ? $4 : "")
+    sample=$idx["sample"]
+    barcode=$idx["barcode"]
+    read1=$idx["read1"]
+    read2=(("read2" in idx) ? $(idx["read2"]) : "")
+    technique=(("technique" in idx) ? $(idx["technique"]) : "'"${UNSET_SENTINEL}"'")
+    pattern=(("pattern" in idx) ? $(idx["pattern"]) : "'"${UNSET_SENTINEL}"'")
 
     if (sample == "") {
       print "Invalid row (sample required): " $0 > "/dev/stderr"
       exit 3
     }
 
-    print sample "\t" barcode "\t" read1 "\t" read2
+    print sample "\t" barcode "\t" read1 "\t" read2 "\t" technique "\t" pattern
   }
 ' "${SAMPLES_TSV}" > "${TASKS_FILE}"
 
@@ -570,19 +804,20 @@ if [[ ! -s "${TASKS_FILE}" ]]; then
   exit 1
 fi
 
-export ROOT_DIR RIBOSEMAP_BIN REMOVE_MXY_BIN BASE_CONFIG GENERATED_DIR MODULES DRY_RUN repository fasta quality
+export ROOT_DIR RIBOSEMAP_BIN REMOVE_MXY_BIN BASE_CONFIG GENERATED_DIR MODULES DRY_RUN repository fasta quality UNSET_SENTINEL
 export RUN_TRIMMING RUN_MISMATCH MISMATCH_REPO_ILLUMINA MISMATCH_REPO_AVITI MISMATCH_POLYN MISMATCH_NTAIL CLEANUP_MISMATCH_FASTQ
-export -f sq reverse_complement_barcode trimmed_fastq_path resolve_analysis_fastq infer_platform_and_read prepare_trimmed_fastq
+export -f sq reverse_complement_barcode normalize_config_override trimmed_fastq_path trimmed_paired_fastq_paths classify_input_layout prepare_trimmed_inputs
+export -f resolve_analysis_inputs
 export -f generate_config materialize_mismatch_fastq run_mismatch_module run_remove_mxy_module run_one_sample
 
 if [[ "${JOBS}" -eq 1 ]]; then
-  while IFS=$'\t' read -r sample barcode read1 read2; do
-    run_one_sample "${sample}" "${barcode}" "${read1}" "${read2}"
+  while IFS=$'\t' read -r sample barcode read1 read2 technique pattern; do
+    run_one_sample "${sample}" "${barcode}" "${read1}" "${read2}" "${technique}" "${pattern}"
   done < "${TASKS_FILE}"
 else
   xargs -a "${TASKS_FILE}" -d $'\n' -P "${JOBS}" -I '{}' bash -lc '
-    IFS=$'\''\t'\'' read -r sample barcode read1 read2 <<< "{}"
-    run_one_sample "$sample" "$barcode" "$read1" "$read2"
+    IFS=$'\''\t'\'' read -r sample barcode read1 read2 technique pattern <<< "{}"
+    run_one_sample "$sample" "$barcode" "$read1" "$read2" "$technique" "$pattern"
   '
 fi
 
