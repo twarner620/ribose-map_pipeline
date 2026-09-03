@@ -474,14 +474,14 @@ prepare_trimmed_inputs() {
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     if [[ "${paired}" -eq 1 ]]; then
-      echo "[DRY-RUN] ${sample} -> trim_galore --paired ${trim_flag} -q ${trim_q} --length ${trim_length} ${read1} ${read2} -o ${trim_dir}" >&2
+      echo "[DRY-RUN] ${sample} -> trim_galore --gzip --paired ${trim_flag} -q ${trim_q} --length ${trim_length} ${read1} ${read2} -o ${trim_dir}" >&2
       predicted_trimmed_paired_fastq_paths "${read1}" "${read2}" "${trim_dir}"
       return 0
     fi
     if [[ -n "${trim_adapter}" ]]; then
-      echo "[DRY-RUN] ${sample} -> trim_galore -a ${trim_adapter} -q ${trim_q} --length ${trim_length} ${read1} -o ${trim_dir}" >&2
+      echo "[DRY-RUN] ${sample} -> trim_galore --gzip -a ${trim_adapter} -q ${trim_q} --length ${trim_length} ${read1} -o ${trim_dir}" >&2
     else
-      echo "[DRY-RUN] ${sample} -> trim_galore ${trim_flag} -q ${trim_q} --length ${trim_length} ${read1} -o ${trim_dir}" >&2
+      echo "[DRY-RUN] ${sample} -> trim_galore --gzip ${trim_flag} -q ${trim_q} --length ${trim_length} ${read1} -o ${trim_dir}" >&2
     fi
     printf "%s\n\n" "$(predicted_trimmed_fastq_path "${read1}" "${trim_dir}")"
     return 0
@@ -492,7 +492,7 @@ prepare_trimmed_inputs() {
 
   echo "[RUN] ${sample} -> trim_galore (${trim_profile})" >&2
   if [[ "${paired}" -eq 1 ]]; then
-    trim_galore --paired ${trim_flag} -q "${trim_q}" --length "${trim_length}" "${read1}" "${read2}" -o "${trim_dir}" >&2
+    trim_galore --gzip --paired ${trim_flag} -q "${trim_q}" --length "${trim_length}" "${read1}" "${read2}" -o "${trim_dir}" >&2
     mapfile -t trimmed_pair < <(trimmed_paired_fastq_paths "${read1}" "${read2}" "${trim_dir}") || {
       echo "trim_galore finished but paired trimmed outputs were not found for ${sample} in ${trim_dir}" >&2
       return 1
@@ -502,9 +502,9 @@ prepare_trimmed_inputs() {
   fi
 
   if [[ -n "${trim_adapter}" ]]; then
-    trim_galore "${read1}" -a "${trim_adapter}" -q "${trim_q}" --length "${trim_length}" --output_dir "${trim_dir}" >&2
+    trim_galore --gzip "${read1}" -a "${trim_adapter}" -q "${trim_q}" --length "${trim_length}" --output_dir "${trim_dir}" >&2
   else
-    trim_galore ${trim_flag} -q "${trim_q}" --length "${trim_length}" "${read1}" -o "${trim_dir}" >&2
+    trim_galore --gzip ${trim_flag} -q "${trim_q}" --length "${trim_length}" "${read1}" -o "${trim_dir}" >&2
   fi
 
   if trimmed="$(trimmed_fastq_path "${read1}" "${trim_dir}")"; then
