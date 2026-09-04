@@ -15,6 +15,9 @@ Required:
 Optional:
   -m  Comma-separated module list (default: trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot)
   -o  Generated config output directory (default: config/generated)
+      --coordinate-quality Override the coordinate MAPQ threshold for this invocation
+      --dependency        Slurm job dependency, e.g. afterok:12345
+      --parsable          Print only the submitted Slurm job ID
       --sample-log-dir Directory for per-sample combined stdout/stderr logs (default: logs/samples)
       --run-date       Date tag for per-sample logs, e.g. 20260220 (default: today YYYYMMDD)
 
@@ -48,6 +51,9 @@ SAMPLES_TSV=""
 BASE_CONFIG=""
 MODULES="trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot"
 GENERATED_DIR="config/generated"
+COORDINATE_QUALITY=""
+DEPENDENCY=""
+PARSABLE=0
 
 ACCOUNT=""
 PARTITION=""
@@ -77,6 +83,15 @@ while [[ $# -gt 0 ]]; do
     -b) BASE_CONFIG="$2"; shift 2 ;;
     -m) MODULES="$2"; shift 2 ;;
     -o) GENERATED_DIR="$2"; shift 2 ;;
+    --coordinate-quality)
+      [[ $# -ge 2 ]] || { echo "--coordinate-quality requires an argument." >&2; exit 1; }
+      COORDINATE_QUALITY="$2"; shift 2
+      ;;
+    --dependency)
+      [[ $# -ge 2 ]] || { echo "--dependency requires an argument." >&2; exit 1; }
+      DEPENDENCY="$2"; shift 2
+      ;;
+    --parsable) PARSABLE=1; shift ;;
     -A) ACCOUNT="$2"; shift 2 ;;
     -p) PARTITION="$2"; shift 2 ;;
     -q) QOS="$2"; shift 2 ;;
@@ -145,6 +160,16 @@ if [[ -n "${ARRAY_PARALLEL}" ]] && ! [[ "${ARRAY_PARALLEL}" =~ ^[1-9][0-9]*$ ]];
   exit 1
 fi
 
+if [[ -n "${COORDINATE_QUALITY}" ]] && ! [[ "${COORDINATE_QUALITY}" =~ ^[0-9]+$ ]]; then
+  echo "--coordinate-quality must be a non-negative integer." >&2
+  exit 1
+fi
+
+if [[ -n "${DEPENDENCY}" ]] && [[ "${DEPENDENCY}" =~ [[:space:]] ]]; then
+  echo "--dependency must be a single Slurm dependency expression." >&2
+  exit 1
+fi
+
 if ! command -v base64 >/dev/null 2>&1; then
   echo "base64 is required but not found in PATH." >&2
   exit 1
@@ -174,7 +199,7 @@ SBATCH_ARGS=(
   --array "${array_spec}"
   --output "/dev/null"
   --error "/dev/null"
-  --export "ALL,PROJECT_ROOT=${ROOT_DIR},SAMPLES_TSV=${SAMPLES_TSV},BASE_CONFIG=${BASE_CONFIG},MODULES_B64=${MODULES_B64},GENERATED_DIR=${GENERATED_DIR},SAMPLE_LOG_DIR=${SAMPLE_LOG_DIR},RUN_DATE=${RUN_DATE}"
+  --export "ALL,PROJECT_ROOT=${ROOT_DIR},SAMPLES_TSV=${SAMPLES_TSV},BASE_CONFIG=${BASE_CONFIG},MODULES_B64=${MODULES_B64},GENERATED_DIR=${GENERATED_DIR},SAMPLE_LOG_DIR=${SAMPLE_LOG_DIR},RUN_DATE=${RUN_DATE},COORDINATE_QUALITY=${COORDINATE_QUALITY}"
 )
 
 if [[ -n "${ACCOUNT}" ]]; then
@@ -186,9 +211,17 @@ fi
 if [[ -n "${QOS}" ]]; then
   SBATCH_ARGS+=(--qos "${QOS}")
 fi
+if [[ -n "${DEPENDENCY}" ]]; then
+  SBATCH_ARGS+=(--dependency "${DEPENDENCY}")
+fi
+if [[ "${PARSABLE}" -eq 1 ]]; then
+  SBATCH_ARGS+=(--parsable)
+fi
 
-echo "Submitting array job with ${sample_count} samples (array=${array_spec})"
-printf 'sbatch %q ' "${SBATCH_ARGS[@]}"
-printf '%q\n' "${TASK_SCRIPT}"
+if [[ "${PARSABLE}" -eq 0 ]]; then
+  echo "Submitting array job with ${sample_count} samples (array=${array_spec})"
+  printf 'sbatch %q ' "${SBATCH_ARGS[@]}"
+  printf '%q\n' "${TASK_SCRIPT}"
+fi
 
 sbatch "${SBATCH_ARGS[@]}" "${TASK_SCRIPT}"

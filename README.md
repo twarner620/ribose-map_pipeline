@@ -134,6 +134,39 @@ scripts/submit_slurm_single.sh \
   --mem 100G
 ```
 
+## Coordinate0 For rDNA-Associated Reads
+
+`quality` is the coordinate module's MAPQ threshold, not an alignment
+parameter. Existing final BAMs can therefore be reprocessed without rerunning
+trimming or alignment. Use the standalone helper to submit a coordinate-only
+array at MAPQ 0:
+
+```bash
+scripts/run_ribosomal.sh -Q 0 \
+  -s config/Mo_libraries.ribose-seq.samples.tsv \
+  -b config/Mo_libraries.base.config \
+  -A gts-fstorici3 -p batch -q embers -t 06:00:00 \
+  --cpus-per-task 8 --mem 48G \
+  -o config/generated/Mo_libraries/coordinate0 \
+  --job-name mo-libraries-coordinate0 \
+  --log-dir logs/Mo_libraries/coordinate0 \
+  --sample-log-dir logs/Mo_libraries/coordinate0/samples \
+  --array-parallel 8
+```
+
+The helper sets `-m coordinate` and `--coordinate-quality 0`; it does not
+rerun trimming or alignment. It creates `results/<sample>/coordinate0/`
+alongside the existing `coordinate30/` directories and never replaces them.
+`run_ribosemap_multi.sh` submits this coordinate0 array with an
+`afterok:<primary-job-id>` dependency, so it begins only when the full primary
+array succeeds. For a manual rerun, add `--dependency afterok:<job-id>` as
+needed.
+
+`coordinate0` retains all genome-wide reads with MAPQ >= 0, including
+ambiguous reads that may derive from rDNA. It does not define an rDNA interval,
+filter `chrXII`, or provide quantitative assignment across the tandem rDNA
+array. A quantitative rDNA analysis needs a dedicated rDNA reference/index.
+
 ## Options
 
 ```text
@@ -143,6 +176,7 @@ scripts/submit_slurm_single.sh \
     Use/omit `trimming` to control whether trim_galore runs in this invocation.
 -j  number of samples to run in parallel (default: 1)
 -o  generated config output directory (default: config/generated)
+    --coordinate-quality override the coordinate MAPQ threshold for this invocation
     --keep-mismatch-fastq keep temporary mismatch FASTQ under results/<sample>/mismatch/input_fastq
 ```
 

@@ -20,6 +20,7 @@ RESULTS_ROOT="${RESULTS_ROOT:-}"
 DRY_RUN="${DRY_RUN:-0}"
 SAMPLE_LOG_DIR="${SAMPLE_LOG_DIR:-logs/samples}"
 RUN_DATE="${RUN_DATE:-$(date +%Y%m%d)}"
+COORDINATE_QUALITY="${COORDINATE_QUALITY:-}"
 
 if [[ -n "${PROJECT_ROOT:-}" ]]; then
   ROOT_DIR="${PROJECT_ROOT}"
@@ -137,6 +138,10 @@ args=(
   -j 1
   -o "${GENERATED_DIR}"
 )
+
+if [[ -n "${COORDINATE_QUALITY}" ]]; then
+  args+=(--coordinate-quality "${COORDINATE_QUALITY}")
+fi
 
 if [[ -n "${RESULTS_ROOT}" ]]; then
   args+=(--results-root "${RESULTS_ROOT}")

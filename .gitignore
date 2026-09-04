@@ -34,3 +34,4 @@ Thumbs.db
 # My own runner scripts
 run_ribosemap_multi.sh
 run_ribosemap_single.sh
+scripts/run_ribosomal.sh

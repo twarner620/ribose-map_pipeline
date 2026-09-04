@@ -16,6 +16,7 @@ Required:
 Optional:
   -m  Comma-separated module list (default: trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot)
   -o  Generated config output directory (default: config/generated)
+      --coordinate-quality Override the coordinate MAPQ threshold for this invocation
       --sample-log-dir Directory for per-sample combined stdout/stderr logs (default: logs/samples)
       --run-date       Date tag for per-sample logs, e.g. 20260220 (default: today YYYYMMDD)
 
@@ -34,6 +35,7 @@ USAGE
 CONFIG=""
 MODULES="trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition,sequence,distribution,hotspot"
 GENERATED_DIR="config/generated"
+COORDINATE_QUALITY=""
 
 ACCOUNT=""
 PARTITION=""
@@ -61,6 +63,10 @@ while [[ $# -gt 0 ]]; do
     -c) CONFIG="$2"; shift 2 ;;
     -m) MODULES="$2"; shift 2 ;;
     -o) GENERATED_DIR="$2"; shift 2 ;;
+    --coordinate-quality)
+      [[ $# -ge 2 ]] || { echo "--coordinate-quality requires an argument." >&2; exit 1; }
+      COORDINATE_QUALITY="$2"; shift 2
+      ;;
     -A) ACCOUNT="$2"; shift 2 ;;
     -p) PARTITION="$2"; shift 2 ;;
     -q) QOS="$2"; shift 2 ;;
@@ -84,6 +90,11 @@ done
 if [[ -z "${CONFIG}" ]]; then
   echo "-c is required." >&2
   usage
+  exit 1
+fi
+
+if [[ -n "${COORDINATE_QUALITY}" ]] && ! [[ "${COORDINATE_QUALITY}" =~ ^[0-9]+$ ]]; then
+  echo "--coordinate-quality must be a non-negative integer." >&2
   exit 1
 fi
 
@@ -153,6 +164,10 @@ args=(
   --run-date "${RUN_DATE}"
   --array-parallel 1
 )
+
+if [[ -n "${COORDINATE_QUALITY}" ]]; then
+  args+=(--coordinate-quality "${COORDINATE_QUALITY}")
+fi
 
 if [[ -n "${ACCOUNT}" ]]; then
   args+=(-A "${ACCOUNT}")
