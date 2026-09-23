@@ -17,6 +17,7 @@ Optional:
   -j  Number of samples to run in parallel (default: 1)
   -o  Directory to write generated per-sample configs (default: config/generated)
       --coordinate-quality Override the coordinate MAPQ threshold for this invocation
+      --run-id             Append this identifier to the base repository path
       --dry-run Generate configs and print planned commands without running modules
       --keep-mismatch-fastq Keep temporary mismatch FASTQ under results/<sample>/mismatch/input_fastq
 
@@ -39,6 +40,8 @@ MODULES="trimming,alignment,coordinate,re_correct,mismatch,removeMXY,composition
 JOBS=1
 GENERATED_DIR="config/generated"
 COORDINATE_QUALITY=""
+RUN_ID="${RUN_ID:-}"
+ALIGNMENT_MAX_ATTEMPTS=""
 DRY_RUN=0
 CLEANUP_MISMATCH_FASTQ=1
 UNSET_SENTINEL="__RIBOSEMAP_UNSET__"
@@ -54,6 +57,15 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       COORDINATE_QUALITY="$2"
+      shift 2
+      ;;
+    --run-id)
+      if [[ $# -lt 2 ]]; then
+        echo "Option $1 requires an argument." >&2
+        usage
+        exit 1
+      fi
+      RUN_ID="$2"
       shift 2
       ;;
     -h) usage; exit 0 ;;
@@ -86,6 +98,14 @@ if [[ -z "${SAMPLES_TSV}" || -z "${BASE_CONFIG}" ]]; then
   exit 1
 fi
 
+if [[ -z "${RUN_ID}" ]]; then
+  RUN_ID="$(date +%Y%m%d_%H%M%S)"
+fi
+if ! [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "--run-id may contain only letters, numbers, dots, underscores, and hyphens." >&2
+  exit 1
+fi
+
 if [[ ! -f "${SAMPLES_TSV}" ]]; then
   echo "Sample sheet not found: ${SAMPLES_TSV}" >&2
   exit 1
@@ -106,6 +126,7 @@ RIBOSEMAP_BIN="${ROOT_DIR}/modules/ribosemap"
 REMOVE_MXY_BIN="${ROOT_DIR}/scripts/removeMXY.sh"
 RE_CORRECT_ROOT="${ROOT_DIR}/submodules/ArtificialRiboseDetection"
 RE_CORRECT_BIN="${RE_CORRECT_ROOT}/subtraction.py"
+RE_CORRECT_LIST="${RE_CORRECT_ROOT}/res_all.list"
 
 if [[ "${DRY_RUN}" -eq 0 && ! -x "${RIBOSEMAP_BIN}" ]]; then
   echo "Missing executable: ${RIBOSEMAP_BIN}" >&2
@@ -123,12 +144,20 @@ if [[ -z "${repository:-}" ]]; then
   echo "repository is not set in ${BASE_CONFIG}" >&2
   exit 1
 fi
+repository="${repository}_${RUN_ID}"
 if [[ -z "${fasta:-}" ]]; then
   echo "fasta is not set in ${BASE_CONFIG}" >&2
   exit 1
 fi
 if [[ -z "${quality:-}" ]]; then
   echo "quality is not set in ${BASE_CONFIG}" >&2
+  exit 1
+fi
+
+# A vanished node-local alignment workdir is retryable; other failures are not.
+ALIGNMENT_MAX_ATTEMPTS="${alignment_max_attempts:-2}"
+if ! [[ "${ALIGNMENT_MAX_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "alignment_max_attempts must be a positive integer." >&2
   exit 1
 fi
 
@@ -147,6 +176,11 @@ MISMATCH_REPO_ILLUMINA="${mismatch_repo_illumina:-${LEGACY_MISMATCH_REPO:-$DEFAU
 MISMATCH_REPO_AVITI="${mismatch_repo_aviti:-${LEGACY_MISMATCH_REPO:-$DEFAULT_MM_REPO_AVITI}}"
 MISMATCH_POLYN="${mismatch_polyN:-5}"
 MISMATCH_NTAIL="${mismatch_ntail:-A}"
+
+if ! [[ "${MISMATCH_POLYN}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "mismatch_polyN must be a positive integer." >&2
+  exit 1
+fi
 
 mkdir -p "${GENERATED_DIR}"
 
@@ -194,6 +228,10 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
     fi
     if [[ ! -f "${RE_CORRECT_BIN}" ]]; then
       echo "Missing re_correct helper: ${RE_CORRECT_BIN}" >&2
+      exit 1
+    fi
+    if [[ ! -f "${RE_CORRECT_LIST}" ]]; then
+      echo "Missing re_correct restriction-enzyme list: ${RE_CORRECT_LIST}" >&2
       exit 1
     fi
   fi
@@ -456,7 +494,7 @@ prepare_trimmed_inputs() {
   local trim_profile="$2"
   local read1="$3"
   local read2="$4"
-  local trim_dir trimmed
+  local trim_dir trimmed trimmed_pair_output
   local trim_length trim_q trim_adapter="" trim_flag=""
   local paired=0
   local -a trimmed_pair
@@ -472,7 +510,7 @@ prepare_trimmed_inputs() {
       trim_length="50"
       trim_q="15"
       ;;
-    RHII-HydEn-seq)
+    RHII-HydEn-seq|Alk-HydEn-seq)
       trim_flag="--illumina"
       trim_length="30"
       trim_q="15"
@@ -512,10 +550,16 @@ prepare_trimmed_inputs() {
   echo "[RUN] ${sample} -> trim_galore (${trim_profile})" >&2
   if [[ "${paired}" -eq 1 ]]; then
     trim_galore --gzip --paired ${trim_flag} -q "${trim_q}" --length "${trim_length}" "${read1}" "${read2}" -o "${trim_dir}" >&2
-    mapfile -t trimmed_pair < <(trimmed_paired_fastq_paths "${read1}" "${read2}" "${trim_dir}") || {
+    if ! trimmed_pair_output="$(trimmed_paired_fastq_paths "${read1}" "${read2}" "${trim_dir}")"; then
       echo "trim_galore finished but paired trimmed outputs were not found for ${sample} in ${trim_dir}" >&2
       return 1
-    }
+    fi
+    mapfile -t trimmed_pair <<< "${trimmed_pair_output}"
+    if [[ ! -s "${trimmed_pair[0]}" || ! -s "${trimmed_pair[1]}" ]]; then
+      echo "Trim Galore did not produce nonempty paired FASTQs for ${sample}: ${trim_dir}" >&2
+      return 1
+    fi
+    validate_trimmed_output "${sample}" "${trim_dir}" "${trimmed_pair[0]}" || return 1
     printf "%s\n%s\n" "${trimmed_pair[0]}" "${trimmed_pair[1]}"
     return 0
   fi
@@ -527,12 +571,85 @@ prepare_trimmed_inputs() {
   fi
 
   if trimmed="$(trimmed_fastq_path "${read1}" "${trim_dir}")"; then
+    validate_trimmed_output "${sample}" "${trim_dir}" "${trimmed}" || return 1
     printf "%s\n\n" "${trimmed}"
     return 0
   fi
 
   echo "trim_galore finished but trimmed output not found for ${sample} in ${trim_dir}" >&2
   return 1
+}
+
+validate_trimmed_output() {
+  local sample="$1"
+  local trim_dir="$2"
+  local trimmed_fastq="$3"
+  local report
+
+  if [[ ! -s "${trimmed_fastq}" ]]; then
+    echo "Trim Galore did not produce a nonempty FASTQ for ${sample}: ${trimmed_fastq}" >&2
+    return 1
+  fi
+
+  report="$(find "${trim_dir}" -maxdepth 1 -type f -name '*_trimming_report.txt' -print -quit)"
+  if [[ -z "${report}" ]] || ! grep -q '^RUN STATISTICS FOR INPUT FILE:' "${report}"; then
+    echo "Trim Galore did not write a complete report for ${sample}: ${trim_dir}" >&2
+    return 1
+  fi
+}
+
+validate_alignment_output() {
+  local sample="$1"
+  local bam="${repository}/results/${sample}/alignment/${sample}.bam"
+  local bai="${bam}.bai"
+
+  if [[ ! -s "${bam}" || ! -s "${bai}" ]]; then
+    echo "Alignment did not produce final BAM and BAI for ${sample}: ${bam}" >&2
+    return 1
+  fi
+
+  if ! samtools quickcheck -v "${bam}"; then
+    echo "Alignment produced an invalid BAM for ${sample}: ${bam}" >&2
+    return 1
+  fi
+}
+
+alignment_retry_marker_path() {
+  local sample="$1"
+  printf '%s\n' "${repository}/results/${sample}/alignment/.retryable_tmp_workdir_missing"
+}
+
+run_alignment_module() {
+  local sample="$1"
+  local cfg="$2"
+  local attempt marker
+
+  for ((attempt = 1; attempt <= ALIGNMENT_MAX_ATTEMPTS; attempt++)); do
+    echo "[RUN] ${sample} -> alignment (attempt ${attempt}/${ALIGNMENT_MAX_ATTEMPTS})"
+    marker="$(alignment_retry_marker_path "${sample}")"
+
+    if "${RIBOSEMAP_BIN}" alignment "${cfg}" && validate_alignment_output "${sample}"; then
+      return 0
+    fi
+
+    if [[ ! -f "${marker}" || "${attempt}" -eq "${ALIGNMENT_MAX_ATTEMPTS}" ]]; then
+      echo "[FAIL] ${sample} -> alignment failed without a retryable temporary-workdir loss." >&2
+      return 1
+    fi
+
+    echo "[RETRY] ${sample} -> local alignment workdir disappeared; retrying alignment with a fresh workdir." >&2
+  done
+}
+
+validate_coordinate_output() {
+  local sample="$1"
+  local bed
+
+  bed="$(coordinate_bed_path "${sample}")"
+  if [[ ! -f "${bed}" ]]; then
+    echo "Coordinate module did not produce BED for ${sample}: ${bed}" >&2
+    return 1
+  fi
 }
 
 resolve_analysis_inputs() {
@@ -549,6 +666,7 @@ resolve_analysis_inputs() {
   local trim_profile=""
   local mismatch_platform=""
   local do_trim=0
+  local trimmed_inputs_output
   local -a trimmed_inputs
 
   case "${input_mode}" in
@@ -581,13 +699,13 @@ resolve_analysis_inputs() {
         do_trim=1
       fi
       ;;
-    RHII-HydEn-seq)
+    RHII-HydEn-seq|Alk-HydEn-seq)
       if [[ "${input_mode}" == "paired" ]]; then
-        trim_profile="RHII-HydEn-seq"
+        trim_profile="${technique}"
         do_trim=1
       fi
       ;;
-    Alk-HydEn-seq|Pu-seq)
+    Pu-seq)
       do_trim=0
       ;;
     "")
@@ -611,7 +729,12 @@ resolve_analysis_inputs() {
   esac
 
   if [[ "${RUN_TRIMMING}" -eq 1 && "${do_trim}" -eq 1 ]]; then
-    mapfile -t trimmed_inputs < <(prepare_trimmed_inputs "${sample}" "${trim_profile}" "${read1}" "${read2}") || return 1
+    # Command substitution preserves a trimming failure; process substitution
+    # would let mapfile succeed even when prepare_trimmed_inputs fails.
+    if ! trimmed_inputs_output="$(prepare_trimmed_inputs "${sample}" "${trim_profile}" "${read1}" "${read2}")"; then
+      return 1
+    fi
+    mapfile -t trimmed_inputs <<< "${trimmed_inputs_output}"
     analysis_read1="${trimmed_inputs[0]:-}"
     analysis_read2="${trimmed_inputs[1]:-}"
     if [[ "${input_mode}" == "single_r1" ]]; then
@@ -666,6 +789,9 @@ generate_config() {
   {
     echo "# Auto-generated by scripts/run_multi_sample.sh"
     echo ". $(sq "${abs_base}")"
+    # This must follow the base config source so every module uses the
+    # timestamped repository rather than the reusable base repository.
+    echo "repository=$(sq "${repository}")"
     echo "sample=$(sq "${sample}")"
     # Keep the base config immutable while making the requested MAPQ threshold
     # explicit in each generated config and therefore its coordinate directory.
@@ -726,30 +852,18 @@ source_coordinate_bed_for_recorrect() {
 
 active_sample_bed_path() {
   local sample="$1"
-  printf '%s\n' "$(coordinate_bed_path "${sample}")"
-}
+  local technique_value="$2"
+  local frag_method_value="$3"
+  local corrected_bed
 
-link_corrected_bed() {
-  local sample="$1"
-  local coord_dir coord_bed backup_bed rel_target
-
-  coord_dir="$(coordinate_bed_dir "${sample}")"
-  coord_bed="${coord_dir}/${sample}.bed"
-  backup_bed="${coord_dir}/${sample}.coordinate.bed"
-  rel_target="../re_correct/${sample}.bed"
-
-  if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "[DRY-RUN] ${sample} -> preserve ${coord_bed} as ${backup_bed} and link ${coord_bed} -> ${rel_target}" >&2
-    return 0
-  fi
-
-  if [[ ! -f "${backup_bed}" ]]; then
-    mv "${coord_bed}" "${backup_bed}"
+  # Keep coordinate##/<sample>.bed immutable after coordinate.  Only eligible
+  # ribose-seq samples consume the separate restriction-corrected BED.
+  if re_correct_should_run "${technique_value}" "${frag_method_value}"; then
+    corrected_bed="$(coordinate_bed_dir "${sample}")/re_correct/${sample}.bed"
+    printf '%s\n' "${corrected_bed}"
   else
-    rm -f "${coord_bed}"
+    source_coordinate_bed_for_recorrect "${sample}"
   fi
-
-  ln -sfn "${rel_target}" "${coord_bed}"
 }
 
 materialize_recorrect_fastq() {
@@ -806,7 +920,7 @@ run_recorrect_module() {
 
   coord_input_bed="$(source_coordinate_bed_for_recorrect "${sample}")"
   coord_input_dir="$(dirname "${coord_input_bed}")"
-  re_out="${repository}/results/${sample}/re_correct"
+  re_out="$(coordinate_bed_dir "${sample}")/re_correct"
   corrected_bed="${re_out}/${sample}.bed"
   workbook="${re_out}/${sample}.re_correct.xlsx"
   genome_dir="$(dirname "${fasta}")"
@@ -830,8 +944,7 @@ run_recorrect_module() {
   materialize_recorrect_fastq "${sample}" "${re_fastq}" "${raw_dir}" >/dev/null
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "[DRY-RUN] ${sample} -> python3 ${RE_CORRECT_BIN} ${list_file} ${raw_dir} -o ${workbook} -d ${d_value} --subtracted_output ${re_out} --bed ${coord_input_dir} --genome ${genome_dir}" >&2
-    echo "[DRY-RUN] ${sample} -> link corrected BED for downstream modules" >&2
+    echo "[DRY-RUN] ${sample} -> python3 ${RE_CORRECT_BIN} ${list_file} ${raw_dir} -o ${workbook} -d ${d_value} --subtracted_output ${re_out} --bed ${coord_input_dir} --genome ${genome_dir} --RElist ${RE_CORRECT_LIST}" >&2
     return 0
   fi
 
@@ -843,14 +956,14 @@ run_recorrect_module() {
     -d "${d_value}" \
     --subtracted_output "${re_out}" \
     --bed "${coord_input_dir}" \
-    --genome "${genome_dir}"
+    --genome "${genome_dir}" \
+    --RElist "${RE_CORRECT_LIST}"
 
   if [[ ! -f "${corrected_bed}" ]]; then
     echo "re_correct finished but corrected BED not found for ${sample}: ${corrected_bed}" >&2
     return 1
   fi
 
-  link_corrected_bed "${sample}"
 }
 
 materialize_mismatch_fastq() {
@@ -858,7 +971,7 @@ materialize_mismatch_fastq() {
   local input_fastq="$2"
   local out_dir out_fastq
 
-  out_dir="${repository}/results/${sample}/mismatch/input_fastq"
+  out_dir="$(coordinate_bed_dir "${sample}")/mismatch/input_fastq"
   out_fastq="${out_dir}/${sample}.fq"
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
@@ -891,8 +1004,8 @@ run_mismatch_module() {
   # shellcheck disable=SC1090
   . "${cfg}"
 
-  sample_bed="$(active_sample_bed_path "${sample}")"
-  mm_out="${repository}/results/${sample}/mismatch"
+  sample_bed="$(active_sample_bed_path "${sample}" "${technique:-}" "${frag_method:-}")"
+  mm_out="$(coordinate_bed_dir "${sample}")/mismatch"
 
   if [[ "${platform}" == "illumina" ]]; then
     mismatch_repo="${MISMATCH_REPO_ILLUMINA}"
@@ -944,28 +1057,144 @@ run_mismatch_module() {
   echo "[RUN] ${sample} -> mismatch analysis (${platform})"
   python3 "${pymatch}" "${sample_bed}" "${fasta}" "${mm_fastq}" -n "${MISMATCH_POLYN}" -o "${mm_out}/MManalysis"
 
+  if [[ ! -f "${mm_analysis}" ]]; then
+    echo "Mismatch analysis did not produce its annotated BED for ${sample}: ${mm_analysis}" >&2
+    return 1
+  fi
+
   awk 'BEGIN{FS=OFS="\t"}{print $1,$2,$3,$4,$5,$6,substr($4,length($4),1),substr($5,length($5),1),$7}' \
     "${mm_analysis}" > "${poly_file}"
 
   awk 'BEGIN{FS=OFS="\t"}{if($7==$8) print $0}' "${poly_file}" > "${matches_file}"
 
+  # removepolyN.R cannot read an empty table.  No matching calls is a valid
+  # result, so materialize the same empty final BED that the R script would use.
+  if [[ ! -s "${matches_file}" ]]; then
+    local empty_final
+    empty_final="$(predicted_mismatch_final_bed_path "${sample}")"
+    : > "${empty_final}"
+    echo "[RUN] ${sample} -> mismatch produced no matching calls; wrote empty final BED" >&2
+    return 0
+  fi
+
   Rscript "${rrmpolyn}" -f "${matches_file}" -c 4 -t "${MISMATCH_NTAIL}" -n "${MISMATCH_POLYN}" -o "${mm_out}"
+
+  local final_bed
+  final_bed="$(predicted_mismatch_final_bed_path "${sample}")"
+  if [[ ! -f "${final_bed}" ]]; then
+    echo "Mismatch filtering did not produce final BED for ${sample}: ${final_bed}" >&2
+    return 1
+  fi
+}
+
+mismatch_final_suffix_index() {
+  # removepolyN.R names its final file using the loop index minus one.
+  printf '%d\n' "$((MISMATCH_POLYN - 1))"
+}
+
+mismatch_final_bed_path() {
+  local sample="$1"
+  local mm_out="$(coordinate_bed_dir "${sample}")/mismatch"
+  local ntail_kmer="" suffix_index=""
+  local expected_bed=""
+  local discovered_bed=""
+
+  if [[ -n "${MISMATCH_NTAIL}" ]]; then
+    ntail_kmer="$(printf "%${MISMATCH_POLYN}s" "" | tr " " "${MISMATCH_NTAIL}")"
+    suffix_index="$(mismatch_final_suffix_index)"
+    expected_bed="${mm_out}/matches_MManalysis_${sample}_${ntail_kmer}_${suffix_index}_final.bed"
+    if [[ -f "${expected_bed}" ]]; then
+      printf '%s\n' "${expected_bed}"
+      return 0
+    fi
+  fi
+
+  discovered_bed="$(find "${mm_out}" -maxdepth 1 -type f -name "matches_MManalysis_${sample}*_final.bed" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"
+  if [[ -n "${discovered_bed}" && -f "${discovered_bed}" ]]; then
+    printf '%s\n' "${discovered_bed}"
+    return 0
+  fi
+
+  return 1
+}
+
+predicted_mismatch_final_bed_path() {
+  local sample="$1"
+  local ntail_kmer="" suffix_index=""
+
+  if [[ -n "${MISMATCH_NTAIL}" ]]; then
+    ntail_kmer="$(printf "%${MISMATCH_POLYN}s" "" | tr " " "${MISMATCH_NTAIL}")"
+  fi
+  suffix_index="$(mismatch_final_suffix_index)"
+  printf '%s\n' "$(coordinate_bed_dir "${sample}")/mismatch/matches_MManalysis_${sample}_${ntail_kmer}_${suffix_index}_final.bed"
+}
+
+materialize_final_bed() {
+  local sample="$1"
+  local technique_value="$2"
+  local final_dir final_bed source_bed
+
+  final_dir="$(coordinate_bed_dir "${sample}")/final"
+  final_bed="${final_dir}/${sample}.bed"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    case "${technique_value}" in
+      ribose-seq)
+        source_bed="$(predicted_mismatch_final_bed_path "${sample}")"
+        ;;
+      emRiboSeq|RHII-HydEn-seq|Alk-HydEn-seq|Pu-seq)
+        source_bed="$(source_coordinate_bed_for_recorrect "${sample}")"
+        ;;
+      *)
+        echo "Cannot determine final BED workflow for ${sample}: unsupported technique '${technique_value:-unset}'." >&2
+        return 1
+        ;;
+    esac
+    echo "[DRY-RUN] ${sample} -> copy ${source_bed} to ${final_bed}" >&2
+    return 0
+  fi
+
+  case "${technique_value}" in
+    ribose-seq)
+      if ! source_bed="$(mismatch_final_bed_path "${sample}")"; then
+        echo "Final BED for ribose-seq sample ${sample} requires mismatch output: $(coordinate_bed_dir "${sample}")/mismatch/matches_MManalysis_${sample}*_final.bed" >&2
+        return 1
+      fi
+      ;;
+    emRiboSeq|RHII-HydEn-seq|Alk-HydEn-seq|Pu-seq)
+      source_bed="$(source_coordinate_bed_for_recorrect "${sample}")"
+      ;;
+    *)
+      echo "Cannot determine final BED workflow for ${sample}: unsupported technique '${technique_value:-unset}'." >&2
+      return 1
+      ;;
+  esac
+
+  if [[ ! -f "${source_bed}" ]]; then
+    echo "Final BED source missing for ${sample}: ${source_bed}" >&2
+    return 1
+  fi
+
+  mkdir -p "${final_dir}"
+  cp -f "${source_bed}" "${final_bed}"
+  echo "[RUN] ${sample} -> final BED ${final_bed}" >&2
 }
 
 run_remove_mxy_module() {
   local sample="$1"
-  local mm_out filtered_dir final_bed out_bed ntail_kmer
+  local mm_out filtered_dir final_bed out_bed ntail_kmer suffix_index
 
-  mm_out="${repository}/results/${sample}/mismatch"
-  filtered_dir="${repository}/results/${sample}/filtered_bed"
+  mm_out="$(coordinate_bed_dir "${sample}")/mismatch"
+  filtered_dir="$(coordinate_bed_dir "${sample}")/filtered_bed"
   ntail_kmer=""
   if [[ -n "${MISMATCH_NTAIL}" ]]; then
     ntail_kmer="$(printf "%${MISMATCH_POLYN}s" "" | tr " " "${MISMATCH_NTAIL}")"
   fi
+  suffix_index="$(mismatch_final_suffix_index)"
 
   final_bed=""
   if [[ -n "${ntail_kmer}" ]]; then
-    final_bed="${mm_out}/matches_MManalysis_${sample}_${ntail_kmer}_${MISMATCH_POLYN}_final.bed"
+    final_bed="${mm_out}/matches_MManalysis_${sample}_${ntail_kmer}_${suffix_index}_final.bed"
     if [[ ! -f "${final_bed}" ]]; then
       final_bed=""
     fi
@@ -998,13 +1227,16 @@ run_one_sample() {
   local pattern_field="$6"
   local frag_method_field="$7"
 
-  local inferred input_mode input_read1 input_read2 processed_barcode analysis_fastq cfg
+  local inferred input_mode input_read1 input_read2 processed_barcode analysis_fastq cfg inferred_output resolved_output
   local analysis_read1 analysis_read2 mismatch_platform technique_override pattern_override frag_method_override effective_technique effective_pattern effective_frag_method
   local mod
   local sample_modules
   local -a inferred_fields resolved_fields
 
-  mapfile -t inferred_fields < <(classify_input_layout "${read1}" "${read2}") || return 1
+  if ! inferred_output="$(classify_input_layout "${read1}" "${read2}")"; then
+    return 1
+  fi
+  mapfile -t inferred_fields <<< "${inferred_output}"
   input_mode="${inferred_fields[0]:-}"
   input_read1="${inferred_fields[1]:-}"
   input_read2="${inferred_fields[2]:-}"
@@ -1031,10 +1263,11 @@ run_one_sample() {
   fi
 
   processed_barcode="$(reverse_complement_barcode "${raw_barcode}")"
-  if ! mapfile -t resolved_fields < <(resolve_analysis_inputs "${sample}" "${input_mode}" "${input_read1}" "${input_read2}" "${effective_technique}" "${effective_pattern}"); then
+  if ! resolved_output="$(resolve_analysis_inputs "${sample}" "${input_mode}" "${input_read1}" "${input_read2}" "${effective_technique}" "${effective_pattern}")"; then
     echo "[FAIL] ${sample} -> trimming/input preparation failed" >&2
     return 1
   fi
+  mapfile -t resolved_fields <<< "${resolved_output}"
   analysis_read1="${resolved_fields[0]:-}"
   analysis_read2="${resolved_fields[1]:-}"
   analysis_fastq="${resolved_fields[2]:-}"
@@ -1054,6 +1287,10 @@ run_one_sample() {
         run_recorrect_module "${sample}" "${analysis_fastq}" "${effective_technique}" "${effective_pattern}" "${effective_frag_method}"
         ;;
       mismatch)
+        if [[ "${effective_technique}" != "ribose-seq" ]]; then
+          echo "[RUN] ${sample} -> mismatch skipped (technique=${effective_technique:-unset})" >&2
+          continue
+        fi
         if [[ -z "${analysis_fastq}" ]]; then
           echo "Mismatch module is only supported for single-end inputs in this wrapper." >&2
           return 1
@@ -1069,18 +1306,29 @@ run_one_sample() {
         else
           echo "[RUN] ${sample} -> coordinate"
           "${RIBOSEMAP_BIN}" coordinate "${cfg}"
+          validate_coordinate_output "${sample}"
         fi
         ;;
       *)
         if [[ "${DRY_RUN}" -eq 1 ]]; then
           echo "[DRY-RUN] ${sample} -> ${RIBOSEMAP_BIN} ${mod} ${cfg}"
         else
-          echo "[RUN] ${sample} -> ${mod}"
-          "${RIBOSEMAP_BIN}" "${mod}" "${cfg}"
+          if [[ "${mod}" == "alignment" ]]; then
+            run_alignment_module "${sample}" "${cfg}"
+          else
+            echo "[RUN] ${sample} -> ${mod}"
+            "${RIBOSEMAP_BIN}" "${mod}" "${cfg}"
+          fi
         fi
         ;;
     esac
   done
+
+  if [[ "${effective_technique}" == "ribose-seq" && "${RUN_MISMATCH}" -eq 0 ]]; then
+    echo "[RUN] ${sample} -> final BED pending (ribose-seq requires mismatch)" >&2
+  else
+    materialize_final_bed "${sample}" "${effective_technique}"
+  fi
 
   echo "[DONE] ${sample}"
 }
@@ -1125,12 +1373,12 @@ if [[ ! -s "${TASKS_FILE}" ]]; then
   exit 1
 fi
 
-export ROOT_DIR RIBOSEMAP_BIN REMOVE_MXY_BIN RE_CORRECT_BIN BASE_CONFIG GENERATED_DIR MODULES DRY_RUN repository fasta quality UNSET_SENTINEL TMP_DIR
+export ROOT_DIR RIBOSEMAP_BIN REMOVE_MXY_BIN RE_CORRECT_BIN RE_CORRECT_LIST BASE_CONFIG GENERATED_DIR MODULES DRY_RUN RUN_ID ALIGNMENT_MAX_ATTEMPTS repository fasta quality UNSET_SENTINEL TMP_DIR
 export RUN_TRIMMING RUN_MISMATCH RUN_RE_CORRECT MISMATCH_REPO_ILLUMINA MISMATCH_REPO_AVITI MISMATCH_POLYN MISMATCH_NTAIL CLEANUP_MISMATCH_FASTQ
 export -f sq reverse_complement_barcode normalize_config_override normalize_frag_method re_correct_should_run pattern_length normalize_re_enzymes
-export -f trimmed_fastq_path predicted_trimmed_fastq_path predicted_trimmed_paired_fastq_paths trimmed_paired_fastq_paths classify_input_layout prepare_trimmed_inputs resolve_analysis_inputs
-export -f generate_config coordinate_bed_dir coordinate_bed_path coordinate_bed_backup_path source_coordinate_bed_for_recorrect active_sample_bed_path link_corrected_bed
-export -f materialize_recorrect_fastq run_recorrect_module materialize_mismatch_fastq run_mismatch_module run_remove_mxy_module run_one_sample
+export -f trimmed_fastq_path predicted_trimmed_fastq_path predicted_trimmed_paired_fastq_paths trimmed_paired_fastq_paths classify_input_layout prepare_trimmed_inputs resolve_analysis_inputs validate_trimmed_output validate_alignment_output validate_coordinate_output alignment_retry_marker_path run_alignment_module
+export -f generate_config coordinate_bed_dir coordinate_bed_path coordinate_bed_backup_path source_coordinate_bed_for_recorrect active_sample_bed_path
+export -f materialize_recorrect_fastq run_recorrect_module materialize_mismatch_fastq run_mismatch_module mismatch_final_suffix_index mismatch_final_bed_path predicted_mismatch_final_bed_path materialize_final_bed run_remove_mxy_module run_one_sample
 
 if [[ "${JOBS}" -eq 1 ]]; then
   while IFS=$'\t' read -r sample barcode read1 read2 technique pattern frag_method; do

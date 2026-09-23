@@ -19,7 +19,8 @@ Optional:
       --dependency        Slurm job dependency, e.g. afterok:12345
       --parsable          Print only the submitted Slurm job ID
       --sample-log-dir Directory for per-sample combined stdout/stderr logs (default: logs/samples)
-      --run-date       Date tag for per-sample logs, e.g. 20260220 (default: today YYYYMMDD)
+      --run-id         Run identifier for output and logs (default: YYYYMMDD_HHMMSS)
+      --run-date       Legacy alias for --run-id
 
 Slurm options:
   -A  Account
@@ -28,7 +29,7 @@ Slurm options:
   -t  Time limit (default: 10:00:00)
       --mem Memory per task (default: 64G)
       --cpus-per-task CPUs per task (default: threads from base config, else 8)
-      --array-parallel Max concurrent array tasks (default: all)
+      --array-parallel Max concurrent array tasks (default: 5)
       --job-name Job name (default: ribose-map-array)
       --log-dir  Log directory (default: logs)
 
@@ -42,7 +43,7 @@ Example:
     --cpus-per-task 16 \
     --mem 100G \
     --sample-log-dir logs/samples \
-    --run-date 20260220 \
+    --run-id 20260220_143000 \
     --array-parallel 8
 USAGE
 }
@@ -61,11 +62,11 @@ QOS=""
 TIME_LIMIT="10:00:00"
 MEMORY="64G"
 CPUS_PER_TASK=""
-ARRAY_PARALLEL=""
+ARRAY_PARALLEL="5"
 JOB_NAME="ribose-map-array"
 LOG_DIR="logs"
 SAMPLE_LOG_DIR="logs/samples"
-RUN_DATE="$(date +%Y%m%d)"
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
 
 abspath() {
   local p="$1"
@@ -104,7 +105,7 @@ while [[ $# -gt 0 ]]; do
     --job-name) JOB_NAME="$2"; shift 2 ;;
     --log-dir) LOG_DIR="$2"; shift 2 ;;
     --sample-log-dir) SAMPLE_LOG_DIR="$2"; shift 2 ;;
-    --run-date) RUN_DATE="$2"; shift 2 ;;
+    --run-id|--run-date) RUN_ID="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
@@ -165,6 +166,11 @@ if [[ -n "${COORDINATE_QUALITY}" ]] && ! [[ "${COORDINATE_QUALITY}" =~ ^[0-9]+$ 
   exit 1
 fi
 
+if ! [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "--run-id may contain only letters, numbers, dots, underscores, and hyphens." >&2
+  exit 1
+fi
+
 if [[ -n "${DEPENDENCY}" ]] && [[ "${DEPENDENCY}" =~ [[:space:]] ]]; then
   echo "--dependency must be a single Slurm dependency expression." >&2
   exit 1
@@ -199,7 +205,7 @@ SBATCH_ARGS=(
   --array "${array_spec}"
   --output "/dev/null"
   --error "/dev/null"
-  --export "ALL,PROJECT_ROOT=${ROOT_DIR},SAMPLES_TSV=${SAMPLES_TSV},BASE_CONFIG=${BASE_CONFIG},MODULES_B64=${MODULES_B64},GENERATED_DIR=${GENERATED_DIR},SAMPLE_LOG_DIR=${SAMPLE_LOG_DIR},RUN_DATE=${RUN_DATE},COORDINATE_QUALITY=${COORDINATE_QUALITY}"
+  --export "ALL,PROJECT_ROOT=${ROOT_DIR},SAMPLES_TSV=${SAMPLES_TSV},BASE_CONFIG=${BASE_CONFIG},MODULES_B64=${MODULES_B64},GENERATED_DIR=${GENERATED_DIR},SAMPLE_LOG_DIR=${SAMPLE_LOG_DIR},RUN_ID=${RUN_ID},COORDINATE_QUALITY=${COORDINATE_QUALITY}"
 )
 
 if [[ -n "${ACCOUNT}" ]]; then

@@ -18,7 +18,8 @@ Optional:
   -o  Generated config output directory (default: config/generated)
       --coordinate-quality Override the coordinate MAPQ threshold for this invocation
       --sample-log-dir Directory for per-sample combined stdout/stderr logs (default: logs/samples)
-      --run-date       Date tag for per-sample logs, e.g. 20260220 (default: today YYYYMMDD)
+      --run-id         Run identifier for output and logs (default: YYYYMMDD_HHMMSS)
+      --run-date       Legacy alias for --run-id
 
 Slurm options:
   -A  Account
@@ -46,7 +47,7 @@ CPUS_PER_TASK=""
 JOB_NAME="ribose-map-single"
 LOG_DIR="logs"
 SAMPLE_LOG_DIR="logs/samples"
-RUN_DATE="$(date +%Y%m%d)"
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
 
 abspath() {
   local p="$1"
@@ -78,7 +79,7 @@ while [[ $# -gt 0 ]]; do
     --job-name) JOB_NAME="$2"; shift 2 ;;
     --log-dir) LOG_DIR="$2"; shift 2 ;;
     --sample-log-dir) SAMPLE_LOG_DIR="$2"; shift 2 ;;
-    --run-date) RUN_DATE="$2"; shift 2 ;;
+    --run-id|--run-date) RUN_ID="$2"; shift 2 ;;
     *)
       echo "Unknown option: $1" >&2
       usage
@@ -95,6 +96,11 @@ fi
 
 if [[ -n "${COORDINATE_QUALITY}" ]] && ! [[ "${COORDINATE_QUALITY}" =~ ^[0-9]+$ ]]; then
   echo "--coordinate-quality must be a non-negative integer." >&2
+  exit 1
+fi
+
+if ! [[ "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "--run-id may contain only letters, numbers, dots, underscores, and hyphens." >&2
   exit 1
 fi
 
@@ -137,7 +143,7 @@ if [[ "${has_r1}" -eq 0 && "${has_r2}" -eq 0 ]]; then
 fi
 
 mkdir -p "${GENERATED_DIR}/single"
-single_samples_tsv="${GENERATED_DIR}/single/${sample}.${RUN_DATE}.samples.tsv"
+single_samples_tsv="${GENERATED_DIR}/single/${sample}.${RUN_ID}.samples.tsv"
 
 {
   printf 'sample\tbarcode\tread1\tread2\ttechnique\tpattern\tfrag_method\n'
@@ -161,7 +167,7 @@ args=(
   --job-name "${JOB_NAME}"
   --log-dir "${LOG_DIR}"
   --sample-log-dir "${SAMPLE_LOG_DIR}"
-  --run-date "${RUN_DATE}"
+  --run-id "${RUN_ID}"
   --array-parallel 1
 )
 

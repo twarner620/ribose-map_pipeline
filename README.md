@@ -54,10 +54,14 @@ Notes:
 - For `Alk-HydEn-seq` and `Pu-seq`, wrapper trimming is skipped.
 - `re_correct` derives the external tool's `-d` offset from the length of `pattern`.
 - `re_correct` uses the trimmed single-end FASTQ when trimming is available for the sample; otherwise it falls back to the original single-end input FASTQ.
-- After `re_correct` succeeds, downstream modules read the corrected BED through the standard coordinate BED path, while the original BED is preserved as `<sample>.coordinate.bed`.
+- `coordinate##/<sample>.bed` is always the unmodified coordinate-module BED. Post-coordinate outputs are isolated beneath that same directory: `coordinate##/re_correct/`, `coordinate##/mismatch/`, and `coordinate##/final/`. For an eligible restriction-digested `ribose-seq` sample, `mismatch` reads `coordinate##/re_correct/<sample>.bed`; otherwise it reads the coordinate BED directly.
+- Each completed sample workflow writes a copy of its terminal BED to `coordinate##/final/<sample>.bed`:
+  - restriction-digested `ribose-seq`: coordinate -> `re_correct` -> mismatch
+  - `ribose-seq` with `frag_method=dsF` or `mech`: coordinate -> mismatch
+  - `emRiboSeq`, `RHII-HydEn-seq`, `Alk-HydEn-seq`, and `Pu-seq`: coordinate only
+- A `ribose-seq` run that does not include `mismatch` leaves `final/` pending rather than labelling an intermediate BED as final.
 - At least one of `read1` or `read2` must be provided for each sample.
-- `mismatch` requires coordinate output (`coordinate` should run before `mismatch`).
-- The wrapper `mismatch` path remains single-end only. Paired-end samples can run the Ribose-Map modules, but not the wrapper `mismatch` module.
+- `mismatch` requires coordinate output (`coordinate` should run before `mismatch`) and runs only for `ribose-seq` rows. It is skipped for the other techniques, whose final BED is the coordinate result.
 
 ## Setup
 Clone the repository:
@@ -108,14 +112,18 @@ scripts/submit_slurm_array.sh \
   --cpus-per-task 16 \
   --mem 100G \
   --sample-log-dir logs/samples \
-  --run-date 20260220 \
+  --run-id 20260220_143000 \
   --array-parallel 8
 ```
 
 Notes:
 - `--array-parallel` caps concurrent samples.
 - `--cpus-per-task` should usually match `threads` in your base config.
-- `--sample-log-dir` writes per-sample combined stdout/stderr logs as `<sample>_<run-date>.log`.
+- Every run receives a `YYYYMMDD_HHMMSS` ID by default. The runner appends it to the base config's `repository` value, preserving prior outputs rather than overwriting them.
+- `--run-id` sets that ID explicitly when related submissions must share one output directory. `--run-date` remains a legacy alias.
+- `--sample-log-dir` writes per-sample combined stdout/stderr logs as `<sample>_<run-id>_<job-id>_<task-id>.log`.
+- Alignment retries once by default only when its node-local work directory disappears. Set optional base-config `alignment_max_attempts` to change the total attempts.
+- `samtools sort` uses `SLURM_CPUS_PER_TASK` when available (otherwise `threads`) and `2G` per sort thread. Set `SAMTOOLS_SORT_MEMORY_PER_THREAD` in the job environment to override the memory value.
 - `-q/--qos` chooses the Slurm QoS (for example `embers` or `inferno`).
 - You do not need multi-node directives in `ribosemap.sbatch` for this mode; submit from login node.
 
@@ -142,25 +150,34 @@ trimming or alignment. Use the standalone helper to submit a coordinate-only
 array at MAPQ 0:
 
 ```bash
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
+
 scripts/run_ribosomal.sh -Q 0 \
   -s config/Mo_libraries.ribose-seq.samples.tsv \
   -b config/Mo_libraries.base.config \
   -A gts-fstorici3 -p batch -q embers -t 06:00:00 \
   --cpus-per-task 8 --mem 48G \
-  -o config/generated/Mo_libraries/coordinate0 \
+  -o "config/generated/Mo_libraries_${RUN_ID}/coordinate0" \
   --job-name mo-libraries-coordinate0 \
-  --log-dir logs/Mo_libraries/coordinate0 \
-  --sample-log-dir logs/Mo_libraries/coordinate0/samples \
+  --log-dir "logs/Mo_libraries_${RUN_ID}/coordinate0" \
+  --sample-log-dir "logs/Mo_libraries_${RUN_ID}/coordinate0/samples" \
+  --run-id "${RUN_ID}" \
   --array-parallel 8
 ```
 
 The helper sets `-m coordinate` and `--coordinate-quality 0`; it does not
 rerun trimming or alignment. It creates `results/<sample>/coordinate0/`
 alongside the existing `coordinate30/` directories and never replaces them.
-`run_ribosemap_multi.sh` submits this coordinate0 array with an
-`afterok:<primary-job-id>` dependency, so it begins only when the full primary
-array succeeds. For a manual rerun, add `--dependency afterok:<job-id>` as
-needed.
+Pass `--postprocess` to run `coordinate,re_correct,mismatch` in the isolated
+`coordinate0/` tree.
+`run_ribosemap_multi.sh` submits a small `afterok:<primary-job-id>` relay,
+which submits the coordinate0 array only after the full primary array succeeds
+and releases its array job slots. This avoids Slurm QoS limits that count every
+pending array element. For a manual rerun, add `--dependency afterok:<job-id>`
+as needed.
+
+Pass the same `--run-id` to the primary trimming/alignment submission and a
+coordinate-only submission so the latter reuses the matching timestamped BAMs.
 
 `coordinate0` retains all genome-wide reads with MAPQ >= 0, including
 ambiguous reads that may derive from rDNA. It does not define an rDNA interval,

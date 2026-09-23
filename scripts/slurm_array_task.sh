@@ -19,7 +19,7 @@ GENERATED_DIR="${GENERATED_DIR:-config/generated}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
 DRY_RUN="${DRY_RUN:-0}"
 SAMPLE_LOG_DIR="${SAMPLE_LOG_DIR:-logs/samples}"
-RUN_DATE="${RUN_DATE:-$(date +%Y%m%d)}"
+RUN_ID="${RUN_ID:-${RUN_DATE:-$(date +%Y%m%d_%H%M%S)}}"
 COORDINATE_QUALITY="${COORDINATE_QUALITY:-}"
 
 if [[ -n "${PROJECT_ROOT:-}" ]]; then
@@ -64,7 +64,9 @@ if [[ -z "${sample_name}" ]]; then
 fi
 
 mkdir -p "${SAMPLE_LOG_DIR}"
-sample_log="${SAMPLE_LOG_DIR}/${sample_name}_${RUN_DATE}.log"
+# Include the Slurm IDs so retries do not overwrite the evidence from an
+# earlier attempt on the same day.
+sample_log="${SAMPLE_LOG_DIR}/${sample_name}_${RUN_ID}_${SLURM_JOB_ID:-unknown}_${SLURM_ARRAY_TASK_ID}.log"
 exec > "${sample_log}" 2>&1
 
 start_ts="$(date '+%F %T')"
@@ -78,6 +80,12 @@ echo "sample: ${sample_name}"
 echo "sample_row: ${sample_row}"
 echo "project_root: ${ROOT_DIR}"
 echo "working_dir: $(pwd)"
+echo "run_id: ${RUN_ID}"
+echo "TMPDIR: ${TMPDIR:-/tmp}"
+echo "tmp_filesystem:"
+df -h "${TMPDIR:-/tmp}" || true
+echo "tmp_inodes:"
+df -i "${TMPDIR:-/tmp}" || true
 echo "======================================"
 
 task_epilogue() {
@@ -96,6 +104,16 @@ task_epilogue() {
   echo "===================================="
 }
 
+handle_signal() {
+  local signal="$1"
+  local signal_exit_code="$2"
+
+  # Preserve scheduler cancellation/preemption in the task log. Without this
+  # handler, the EXIT trap can misleadingly report a successful shell status.
+  echo "Received ${signal}; terminating task."
+  exit "${signal_exit_code}"
+}
+
 tmp_tsv="$(mktemp "${TMPDIR:-/tmp}/ribose-map-array-task.XXXXXX.tsv")"
 cleanup_and_epilogue() {
   local rc="$?"
@@ -104,6 +122,9 @@ cleanup_and_epilogue() {
   exit "${rc}"
 }
 trap cleanup_and_epilogue EXIT
+trap 'handle_signal TERM 143' TERM
+trap 'handle_signal INT 130' INT
+trap 'handle_signal HUP 129' HUP
 
 set +u
 if ! command -v module >/dev/null 2>&1; then
@@ -137,6 +158,7 @@ args=(
   -m "${MODULES}"
   -j 1
   -o "${GENERATED_DIR}"
+  --run-id "${RUN_ID}"
 )
 
 if [[ -n "${COORDINATE_QUALITY}" ]]; then

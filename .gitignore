@@ -35,3 +35,5 @@ Thumbs.db
 run_ribosemap_multi.sh
 run_ribosemap_single.sh
 scripts/run_ribosomal.sh
+RS_oneoff-12878184.log
+run_rs_oneoff.sh
